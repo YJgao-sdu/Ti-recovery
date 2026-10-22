@@ -179,17 +179,17 @@ class Tita(LeggedRobot):
         moving_idx = self.force_scale < 80.0
 
         # reward update
-        # self.reward_group = self.reward_group_list["reward_group_2"]
-        # if torch.sum(1.0 * stand_idx) > self.num_envs * 2 / 3:
-        #     self.reward_group = self.reward_group_list["reward_group_2"]
-        #     # print("第二阶段")
-        # elif torch.sum(1.0 * walk_idx) > self.num_envs * 2 / 3:
-        #     self.reward_group = self.reward_group_list["reward_group_3"]
-        #     # print("由二转三")
-        #     if torch.sum(1.0 * moving_idx) > self.num_envs * 2 / 3:
-        #         self.reward_group = self.reward_group_list["reward_group_4"]
-        #         # print("进入第四阶段")
-        self.reward_group = self.reward_group_list["reward_group_4"]
+        self.reward_group = self.reward_group_list["reward_group_2"]
+        if torch.sum(1.0 * stand_idx) > self.num_envs * 2 / 3:
+            self.reward_group = self.reward_group_list["reward_group_2"]
+            # print("第二阶段")
+        elif torch.sum(1.0 * walk_idx) > self.num_envs * 2 / 3:
+            self.reward_group = self.reward_group_list["reward_group_3"]
+            # print("由二转三")
+            if torch.sum(1.0 * moving_idx) > self.num_envs * 2 / 3:
+                self.reward_group = self.reward_group_list["reward_group_4"]
+                # print("进入第四阶段")
+        # self.reward_group = self.reward_group_list["reward_group_4"]
             
 
     def _reward_register(self):
@@ -361,7 +361,7 @@ class Tita(LeggedRobot):
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            # self.root_states[env_ids, 3:7] = random_quat(torch_rand_float(0, 1, (len(env_ids), 4), device=self.device))
+            self.root_states[env_ids, 3:7] = random_quat(torch_rand_float(0, 1, (len(env_ids), 4), device=self.device))
 
         self.root_states[env_ids, 7:13] = torch_rand_float(
             -0.5, 0.5, (len(env_ids), 6), device=self.device

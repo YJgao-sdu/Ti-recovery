@@ -492,7 +492,7 @@ class LeggedRobot(BaseTask):
         raise NotImplementedError
 
     def _reset_dofs(self, env_ids):
-        self.dof_pos[env_ids] = self.init_dof_pos * torch_rand_float(
+        self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(
             0.8, 1.2, (len(env_ids), self.num_dof), device=self.device
         )
         self.dof_vel[env_ids] = 0.0
