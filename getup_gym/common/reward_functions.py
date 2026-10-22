@@ -2,6 +2,7 @@ import torch
 from getup_gym.common.base_task import BaseTask
 import numpy as np
 from isaacgym.torch_utils import quat_rotate
+from isaacgym.torch_utils import *
 
 def sigmoid(x, value_at_1):
     scale = np.sqrt(-2 * np.log(value_at_1))
@@ -32,12 +33,16 @@ def rew_orientation(env: BaseTask):
     
 def track_base_height_exp(env: BaseTask):
     base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
+    
+    hip_init_angle = torch.ones(env.num_envs,device=env.device) * env.default_dof_pos[:,0]
+    hip_bias = torch.square(env.dof_pos[:,0] - hip_init_angle) + torch.abs(env.dof_pos[:,4] - hip_init_angle)
+    hip_limit = torch.exp(-hip_bias/0.1)
     if env.cfg.commands.base_height_command:
         height_dim = env.cfg.commands.num_commands - 1
         target_base_height = env.commands[:, height_dim]
     else:
         target_base_height = env.target_height
-    return torch.exp(-torch.abs(base_height - target_base_height)/env.cfg.rewards.tracking_sigma)
+    return torch.exp(-torch.abs(base_height - target_base_height)/env.cfg.rewards.tracking_sigma) * hip_limit
 
 def small_pos(env:BaseTask):
     target_joint_pos = [0.0, 0.5, -1.0, 0.0, 0.0, 0.5, -1.0, 0.0]
@@ -105,10 +110,11 @@ def action_rate_wheel(env: BaseTask):
 
 def collision(env: BaseTask):
     # Penalize collisions on selected bodies
-    return torch.sum(
-        1.0 * (torch.norm(env.contact_forces[:, env.penalised_contact_indices, :], dim=-1) > 0.1),
+    reward = torch.sum(
+        1.0 * (torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1) > 0.1),
         dim=1,
     )
+    return reward
 
 def pen_termination(env: BaseTask):
     # Terminal reward / penalty
@@ -149,7 +155,7 @@ def track_lin_vel_xy_exp(env: BaseTask):
     # Tracking of linear velocity commands (xy axes)
     lin_vel_sigma = env.cfg.rewards.tracking_sigma
     lin_vel_error = torch.sum(torch.square(env.commands[:, :2] - env.base_lin_vel[:, :2]),dim=1)    
-    return torch.exp(-lin_vel_error / lin_vel_sigma)* (base_height > 0.6)
+    return torch.exp(-lin_vel_error / lin_vel_sigma) * (base_height > 0.31)
 
 def tracking_lin_vel_y(env: BaseTask):
     # Tracking of linear velocity commands (y axis)
@@ -165,6 +171,7 @@ def tracking_lin_vel_x(env: BaseTask):
 
 def track_ang_vel_yaw_exp(env: BaseTask):
     # Tracking of angular velocity commands (yaw)
+    base_height = torch.mean(env.rigid_body_states[:, env.base_indices, 2] - env.measured_heights, dim=1)
     ang_vel_error = torch.square(env.commands[:, 2] - env.base_ang_vel[:, 2])
     lin_vel_sigma = env.cfg.rewards.tracking_sigma
     return torch.exp(-ang_vel_error / 0.12)
@@ -196,6 +203,7 @@ def stumble(env: BaseTask):
 def pen_dof_pos_bias_l2(env: BaseTask):
     """在零指令下惩罚运动"""
     # Penalize motion at zero commands
+    z_up = env.projected_gravity[:, 2] < -0.9
     contact = (torch.sum(env.contacts_z, dim=-1) > 1) * 1.0
     hip_init_angle = torch.ones(env.num_envs,device=env.device) * env.default_dof_pos[:,0]
     thigh_init_angle = torch.ones(env.num_envs,device=env.device)* env.default_dof_pos[:,1]
@@ -208,9 +216,15 @@ def pen_dof_pos_bias_l2(env: BaseTask):
     shank_bias = torch.square(env.dof_pos[:,2] - shank_init_angle) + torch.abs(
         env.dof_pos[:,6] - shank_init_angle
     )
-    bias_sum = torch.square(thigh_bias + shank_bias + hip_bias)* contact
+    bias_sum = torch.square(thigh_bias + shank_bias + hip_bias) * z_up
     
     return bias_sum
+
+def knee_height(env: BaseTask):
+    knee_height = env.rigid_body_states.view(env.num_envs, env.num_bodies, 13)[:, env.calf_indices, 0:3]
+    relative_knee_height = knee_height[:,:,2] - env._get_heights_below_foot()
+    reward = torch.sum(torch.exp(-(relative_knee_height - 0.12) / (2*(0.1)**2)),dim=1)
+    return reward 
 
 def feet_contact_forces(env: BaseTask):
     # penalize high contact forces
@@ -224,7 +238,7 @@ def feet_contact_forces(env: BaseTask):
 def pen_two_leg_bias_l2(env: BaseTask):
     """惩罚：如果两只脚的关节角度差别太大，说明此时在使用交叉平衡，需要惩罚"""
     contact = (torch.sum(env.contacts_z, dim=-1) > 1) * 1.0
-    hip_thick = env.dof_pos[:,0] - env.dof_pos[:,4]
+    hip_thick = env.dof_pos[:,0] + env.dof_pos[:,4]
     dof_thick = env.dof_pos[:,1] - env.dof_pos[:,5]
     dof_shank = env.dof_pos[:,2] - env.dof_pos[:,6]
     # if the robot is standing on two legs, then penalize the difference in joint angles
@@ -235,11 +249,30 @@ def wheel_acc(env: BaseTask):
 # Penalize dof accelerations
     return torch.sum(torch.square((env.last_dof_vel[:,[3,7]] - env.dof_vel[:,[3,7]]) / env.dt), dim=1)
 
+def wheel_adjustment(env: BaseTask):
+    # 鼓励使用轮子的滑动克服前后的倾斜，奖励轮速和倾斜方向一致的情况，并要求轮速方向也一致
+    incline_x = env.projected_gravity[:, 0]
+    # mean velocity
+    wheel_x_mean = (env.foot_velocities[:, 0, 0] + env.foot_velocities[:, 1, 0]) / 2
+    # 两边轮速不一致的情况，不给奖励
+    wheel_x_invalid = (env.foot_velocities[:, 0, 0] * env.foot_velocities[:, 1, 0]) < 0
+    wheel_x_mean[wheel_x_invalid] = 0.0
+    wheel_x_mean = wheel_x_mean.reshape(-1)
+    reward = incline_x * wheel_x_mean > 0
+    trunk_contact = torch.norm(env.contact_forces[:, 0, :], dim=-1) < 0.1
+    return reward * trunk_contact
+
 def pen_no_fly_l2(env: BaseTask):
     contacts = env.contact_forces[:, env.feet_indices, 2] > 1.0
     # single_contact = torch.sum(1.0 * contacts, dim=1) == 1
     dual_contact = torch.sum(1.0 * contacts, dim=1) != 2
     return 1.0 * dual_contact
+
+def no_fly(env: BaseTask):
+    contacts = env.contact_forces[:, env.feet_indices, 2] > 1.0
+    both_contact = torch.sum(1.0 * contacts, dim=1) == 2
+    z_up = env.projected_gravity[:, 2] < -0.9
+    return 1.0 * both_contact * z_up
 
 def no_fly_3(env: BaseTask):
     contacts = env.contact_forces[:, env.feet_indices, 2] > 0.1
@@ -317,7 +350,7 @@ def pen_action_smoothness_l2(env: BaseTask):
 
 def wheel_distance_x(env: BaseTask):
     # contacts = torch.abs(env.contact_forces[:, env.feet_indices, 2]) > 0.1
-    return (1.0* (env.feet_distance_x < 0.02))* 0.2 - (1.0* (env.feet_distance_x > 0.02))* env.feet_distance_x
+    return (1.0* (env.feet_distance_x <= 0.02))* 0.2 - (1.0* (env.feet_distance_x > 0.02))* env.feet_distance_x
 
 
 
@@ -362,7 +395,7 @@ def rew_wheel_contact_force(env: BaseTask):
 def pen_joint_power_l2(env: BaseTask):
     """power pen"""
     base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
-    reward = torch.sum(torch.abs(env.dof_vel)* torch.abs(env.torques), dim=1) * (base_height < 0.7)
+    reward = torch.sum(torch.abs(env.dof_vel)* torch.abs(env.torques), dim=1) * (base_height < 0.36)
     return reward
 
 def slow_get_up(env: BaseTask):
@@ -405,6 +438,80 @@ def fem_bias_2(env: BaseTask):
     reward[idx] = fem_bias[idx]
     return reward
 
+def leg_symmetry(env: BaseTask):
+        
+    foot_positions_base = env.foot_positions - \
+                        (env.base_position).unsqueeze(1).repeat(1, len(env.feet_indices), 1)
+    for i in range(len(env.feet_indices)):
+        foot_positions_base[:, i, :] = quat_rotate_inverse(env.base_quat, foot_positions_base[:, i, :] )
+    leg_symmetry_err = (abs(foot_positions_base[:,0,0])-abs(foot_positions_base[:,1,0]))
+    reward = torch.exp(-(leg_symmetry_err ** 2)/ env.cfg.rewards.leg_symmetry_tracking_sigma)
+    return reward
+
+def feet_distance(env: BaseTask):
+        feet_distance = torch.abs(torch.norm(env.feet_state[:, 0, :2] - env.feet_state[:, 1, :2], dim=-1))
+        z_up = env.projected_gravity[:, 2] < -0.8
+        # reward = torch.abs(feet_distance - self.cfg.rewards.min_feet_distance)
+        reward = torch.clip(env.cfg.rewards.min_feet_distance - feet_distance, 0, 1) + \
+                 torch.clip(feet_distance - env.cfg.rewards.max_feet_distance, 0, 1)
+        return reward
+        
+def feet_pose_track(env: BaseTask):
+    """基座朝上时，引导关节位形从当前姿态收敛到 target_pose。
+
+    使用位置插值：在基座刚翻正(上升沿)时把当前位形记录为插值起点，
+    随后参考位形随时间从起点线性滑向 target_pose,奖励跟踪该参考位形。
+    机器人一旦达到目标姿态，奖励即锁定为最大值(达成一次即可，不要求一直保持),
+    直到回合结束(env.reset_buf)才解除锁定、重新争取。
+    达成第一个目标位形后，继续用同样的方式引导关节位形靠近第二个目标位形 next_target_pose。
+    """
+    target_pose = torch.tensor([0.0, 1.1, -2.6, 0.0, 0.0, 1.1, -2.6, 0.0], device=env.device).repeat(env.num_envs, 1)
+    z_up = env.projected_gravity[:, 2] < -0.8
+
+    # 惰性初始化插值所需的状态缓冲
+    if not hasattr(env, "feet_track_start_pose"):
+        env.feet_track_start_pose = env.dof_pos.clone()
+        env.feet_track_timer = torch.zeros(env.num_envs, device=env.device)
+        env.feet_track_up_last = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env.feet_track_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # 回合结束后解除锁定，新回合需要重新达成目标姿态
+    env.feet_track_reached = env.feet_track_reached & ~env.reset_buf.bool()
+
+    # 基座刚翻正(上升沿)时，把当前位形记录为插值起点
+    first_up = z_up & ~env.feet_track_up_last
+    env.feet_track_start_pose[first_up] = env.dof_pos[first_up]
+    env.feet_track_up_last = z_up.clone()
+
+    # 基座朝上时计时，翻倒时计时归零
+    env.feet_track_timer = torch.where(
+        z_up, env.feet_track_timer + env.dt, torch.zeros_like(env.feet_track_timer)
+    )
+
+    # 位置插值：参考位形从起点随时间逐步滑向 target_pose
+    interp_time = getattr(env.cfg.rewards, "feet_pose_track_time", 5.0)
+    alpha = (env.feet_track_timer / interp_time).clamp(0.0, 1.0)
+    ref_pose = env.feet_track_start_pose + alpha.unsqueeze(1) * (target_pose - env.feet_track_start_pose)
+
+    # 每个关节都接近 target_pose 且基座朝上时，视为达成目标姿态，此后奖励锁定为最大值
+    # 回合结束的当步(reset_buf)不允许达成判定，避免把旧回合的位形带入新回合
+    reach_tol = getattr(env.cfg.rewards, "feet_pose_track_tol", 0.05)
+    leg_list = [0, 1, 2, 4, 5, 6]
+    max_err = torch.max(torch.abs(env.dof_pos[:,leg_list] - target_pose[:,leg_list]), dim=1).values
+    env.feet_track_reached = env.feet_track_reached | (z_up & (max_err < reach_tol) & ~env.reset_buf.bool())
+
+    # 仅在基座朝上时奖励跟踪插值参考位形
+    error = torch.sum(torch.square(env.dof_pos[:,leg_list] - ref_pose[:,leg_list]), dim=1)
+    sigma = getattr(env.cfg.rewards, "feet_pose_track_sigma", 0.3)
+    tracking_reward = torch.exp(-error / sigma) * z_up
+    reward1 = torch.where(env.feet_track_reached, torch.ones_like(tracking_reward), tracking_reward)
+
+    # 达成第一个目标姿态后，用同样的方式引导关节位形靠近第二个目标位形
+    next_target_pose = torch.tensor([0.0, 0.8, -1.5, 0.0, 0.0, 0.8, -1.5, 0.0], device=env.device).repeat(env.num_envs, 1)
+    next_error = torch.sum(torch.square(env.dof_pos[:, leg_list] - next_target_pose[:, leg_list]), dim=1)
+    reward2 = env.feet_track_reached * torch.exp(-next_error / sigma) * z_up
+
+    return reward1 + reward2
 # ----- Unitree reward -----
 
 def rew_left_foot_displacement(env: BaseTask):

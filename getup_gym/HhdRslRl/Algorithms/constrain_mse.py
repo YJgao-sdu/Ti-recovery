@@ -6,7 +6,7 @@ from getup_gym.HhdRslRl.basement.base_modules.ModulesBase import ModulesBase
 import torch.optim as optim
 from getup_gym.HhdRslRl.basement.base_algorithm.AlgorithmBase import AlgorithmBase
 from torch.distributions import Normal, kl_divergence
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 import copy
 
 class ProjectionHead(nn.Module):

@@ -183,6 +183,7 @@ def get_args():
     custom_parameters = [
         {"name": "--task", "type": str, "default": "BipedalWheeled", "help": "Task name"},
         {"name": "--resume", "action": "store_true", "default": False, "help": "Resume from checkpoint"},
+        {"name": "--export_onnx", "action": "store_true", "default": False, "help": "Export policy to ONNX for deployment"},
         {"name": "--experiment_name", "type": str, "help": "Experiment name"},
         {"name": "--run_name", "type": str, "help": "Run name"},
         {"name": "--load_run", "type": str, "help": "Load specific run"},

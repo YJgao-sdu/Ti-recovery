@@ -81,6 +81,41 @@ pen_no_fly_l2 = RewardManagerCfg(
     weight=0.0,
 )
 
+no_fly = RewardManagerCfg(
+    func=no_fly,
+    weight=0.0,
+)
+
+knee_height = RewardManagerCfg(
+    func=knee_height,
+    weight=0.0,
+)
+
+feet_distance = RewardManagerCfg(
+    func=feet_distance,
+    weight=0.0,
+)
+
+leg_symmetry = RewardManagerCfg(
+    func=leg_symmetry,
+    weight=0.0,
+)
+
+wheel_distance_x = RewardManagerCfg(
+    func=wheel_distance_x,
+    weight=0.0,
+)
+
+feet_pose_track = RewardManagerCfg(
+    func=feet_pose_track,
+    weight=0.0,
+)
+
+wheel_adjustment = RewardManagerCfg(
+    func=wheel_adjustment,
+    weight=0.0,
+)
+
 pen_max_velocity_l2 = RewardManagerCfg(
     func=pen_max_velocity_l2,
     weight=0.0,
@@ -364,6 +399,14 @@ def reward_register(reward_manager: RewardManager):
 
     reward_manager.register_reward(no_fly_3)
     reward_manager.register_reward(pen_no_fly_l2)
+    reward_manager.register_reward(no_fly)
+    reward_manager.register_reward(knee_height)
+    reward_manager.register_reward(feet_distance)
+    reward_manager.register_reward(leg_symmetry)
+    reward_manager.register_reward(wheel_distance_x)
+    reward_manager.register_reward(wheel_adjustment)
+    
+    reward_manager.register_reward(feet_pose_track)
 
     reward_manager.register_reward(pen_max_velocity_l2)
 

@@ -314,7 +314,7 @@ class OnPolicyRunner:
             )
 
     def load(self, path, load_optimizer=True):
-        loaded_dict = torch.load(path, map_location=self.device, weights_only=True)
+        loaded_dict = torch.load(path, map_location=self.device, weights_only=False)
         self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
         if load_optimizer and "optimizer_state_dict" in loaded_dict:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
@@ -322,7 +322,7 @@ class OnPolicyRunner:
         return loaded_dict.get("infos")
 
     def encoder_load(self, path, encoder_type="teacher"):
-        loaded_dict = torch.load(path, map_location=self.device, weights_only=True)
+        loaded_dict = torch.load(path, map_location=self.device, weights_only=False)
         if encoder_type == "teacher":
             self.teacher_encoder.load_state_dict(loaded_dict["model_state_dict"])
         elif encoder_type == "student":

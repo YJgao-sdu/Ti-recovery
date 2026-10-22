@@ -137,6 +137,11 @@ class LeggedRobot(BaseTask):
         if hasattr(self, '_pre_reward_callback'):
             self._pre_reward_callback()
 
+        self.foot_positions = self.rigid_body_states.view(
+            self.num_envs, self.num_bodies, 13
+        )[:, self.feet_indices, 0:3]
+        self.foot_velocities = (self.foot_positions - self.last_foot_positions) / self.dt
+
         self._post_physics_step_callback()
 
         # Optional base height target update (used by fall-recovery envs)
@@ -167,6 +172,7 @@ class LeggedRobot(BaseTask):
         self.last_base_ang_velocity[:] = self.base_ang_vel[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+        self.last_foot_positions[:] = self.foot_positions[:]
         if hasattr(self, "last_dof_pos"):
             self.last_last_dof_pos[:] = self.last_dof_pos[:]
             self.last_dof_pos[:] = self.dof_pos[:]
@@ -213,6 +219,7 @@ class LeggedRobot(BaseTask):
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
+        self.last_foot_positions[env_ids] = self.foot_positions[env_ids]
         if hasattr(self, "real_episode_length_buf"):
             self.real_episode_length_buf[env_ids] = 0
 
@@ -416,6 +423,8 @@ class LeggedRobot(BaseTask):
             (len(env_ids), 1),
             device=self.device,
         ).squeeze(1)
+        # print("线速度指令：", self.command_ranges["lin_vel_x"][0], self.command_ranges["lin_vel_x"][1])
+        # print("角速度指令：", self.command_ranges["lin_vel_y"][0], self.command_ranges["lin_vel_y"][1])
 
         x_only_idx = torch.where(env_ids < self.cfg.commands.ranges.lin_vel_x_only)
         without_lin_vel_y = torch.where(
@@ -483,8 +492,8 @@ class LeggedRobot(BaseTask):
         raise NotImplementedError
 
     def _reset_dofs(self, env_ids):
-        self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(
-            0.5, 1.5, (len(env_ids), self.num_dof), device=self.device
+        self.dof_pos[env_ids] = self.init_dof_pos * torch_rand_float(
+            0.8, 1.2, (len(env_ids), self.num_dof), device=self.device
         )
         self.dof_vel[env_ids] = 0.0
         env_ids_int32 = env_ids.to(dtype=torch.int32)
@@ -651,6 +660,7 @@ class LeggedRobot(BaseTask):
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]
         self.base_quat = self.root_states[:, 3:7]
+        self.base_position = self.root_states[:, :3]
         self.dip_angle_y = torch.arcsin(
             2
             * (
@@ -752,10 +762,19 @@ class LeggedRobot(BaseTask):
         self.default_dof_pos = torch.zeros(
             self.num_dof, dtype=torch.float, device=self.device, requires_grad=False
         )
+        self.init_dof_pos = torch.zeros(
+            self.num_dof, dtype=torch.float, device=self.device, requires_grad=False
+        )
+
         for i in range(self.num_dofs):
             name = self.dof_names[i]
             angle = self.cfg.init_state.default_joint_angles[name]
             self.default_dof_pos[i] = angle
+
+        for i in range(self.num_dofs):
+            name = self.dof_names[i]
+            angle = self.cfg.init_state.init_joint_angles[name]
+            self.init_dof_pos[i] = angle
 
         p_gains_i = 0
         for dof_name in self.cfg.control.stiffness.keys():
@@ -769,6 +788,7 @@ class LeggedRobot(BaseTask):
             self.d_gains[p_gains_i] = self.cfg.control.damping[dof_name]
             p_gains_i += 1
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
+        self.init_dof_pos = self.init_dof_pos.unsqueeze(0)
 
         self.kp = torch.zeros(
             self.num_dof, device=self.device, requires_grad=False, dtype=torch.float32
@@ -824,6 +844,11 @@ class LeggedRobot(BaseTask):
             self.num_envs, self.num_bodies, -1
         )
         self.feet_state = self.rigid_body_states[:, self.feet_indices, :]
+        self.foot_positions = self.rigid_body_states.view(
+            self.num_envs, self.num_bodies, 13
+        )[:, self.feet_indices, 0:3]
+        self.foot_velocities = torch.zeros_like(self.foot_positions)
+        self.last_foot_positions = torch.zeros_like(self.foot_positions)
         self.counter_l = None
         self.counter_r = None
         self.body_states_reshape = None
@@ -842,7 +867,7 @@ class LeggedRobot(BaseTask):
         self.dof_vel_save = torch.zeros_like(self.dof_vel)
         self.target_dof_pos = torch.zeros_like(self.dof_pos)
 
-        base_name = "torso"
+        base_name = "base_link"
         self.base_indice = self.gym.find_actor_rigid_body_handle(
             self.envs[0], self.actor_handles[0], base_name
         )
@@ -1042,6 +1067,7 @@ class LeggedRobot(BaseTask):
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
         feet_names = self.cfg.asset.foot_name
+        calf_names = self.cfg.asset.calf_name
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
             penalized_contact_names.extend([s for s in body_names if name in s])
@@ -1126,6 +1152,10 @@ class LeggedRobot(BaseTask):
                 self.envs[0], self.actor_handles[0], termination_contact_names[i]
             )
         self.body_names = body_names
+        self.calf_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
+        for i in range(len(calf_names)):
+            self.calf_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], calf_names[i])
+ 
 
     def _get_env_origins(self):
         if self.cfg.terrain.mesh_type in ["heightfield", "trimesh"]:
@@ -1177,6 +1207,7 @@ class LeggedRobot(BaseTask):
         else:
             self.reward_scales = {}
         self.command_ranges = class_to_dict(self.cfg.commands.ranges)
+        print("self.command_ranges", self.command_ranges)
 
         # Support reward groups (used by some envs for curriculum)
         if hasattr(self.cfg.rewards, 'curriculum') and hasattr(self.cfg.rewards.curriculum, 'reward_group'):

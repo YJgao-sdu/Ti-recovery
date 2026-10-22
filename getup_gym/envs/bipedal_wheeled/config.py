@@ -419,7 +419,7 @@ class GetUpPPO(BaseConfig):
         )
         
         num_steps_per_env = 24      
-        max_iterations = 1500        
+        max_iterations = 8000        
 
         # logging
         save_interval = 50          # check for potential saves every this many iterations
