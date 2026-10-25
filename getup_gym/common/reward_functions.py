@@ -110,10 +110,87 @@ def action_rate_wheel(env: BaseTask):
 
 def collision(env: BaseTask):
     # Penalize collisions on selected bodies
-    reward = torch.sum(
-        1.0 * (torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1) > 0.1),
-        dim=1,
+    knee_force = torch.norm(
+        env.contact_forces[:, env.calf_indices, :],
+        dim=-1
     )
+    # 2. 平滑惩罚：5N 以下忽略，5~25N 逐渐增加，25N 以上达到 1
+    force_threshold = 5.0
+    force_ramp = 20.0
+
+    knee_penalty_each = torch.clamp((knee_force - force_threshold) / force_ramp,min=0.0,max=1.0)
+
+    # 左右膝惩罚相加，取值范围 [0, 2]
+    knee_penalty = torch.sum(knee_penalty_each, dim=1)
+
+    # 3. 计算机身相对地面的高度
+    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
+
+    # 4. 判断机身是否接近直立
+    # 直立时 projected_gravity 的 z 分量应接近 -1
+    upright = env.projected_gravity[:, 2] < -0.90
+
+    # 5. 判断是否达到准备站立的高度
+    height_ready = base_height >= 0.28
+
+    # 6. 判断左右轮是否同时接触地面
+    wheel_contact_z = env.contact_forces[:, env.feet_indices, 2]
+
+    both_wheels_contact = torch.all(wheel_contact_z > 5.0, dim=1)
+
+    # 7. 仅在进入站立准备状态后启用惩罚
+    stand_ready = (upright & height_ready & both_wheels_contact)
+    reward = knee_penalty * stand_ready.float()
+    return reward
+
+    # reward = torch.sum(
+    #     1.0 * (torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1) > 0.1),
+    #     dim=1,
+    # )
+    # return reward
+
+def pen_knee_contact(env: BaseTask):
+    """
+    B1: 膝盖接触惩罚。
+    前期允许膝盖参与姿态调整；
+    当机身接近直立且高度达到准备站立区间后，
+    持续膝盖接触会受到惩罚。
+    """
+    # 左右膝对应刚体的接触力大小，shape = [num_envs, 2]
+    knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1)
+
+    # 接触力软惩罚：5N 以下为 0，
+    # 5~25N 线性增加，25N 以上饱和为 1
+    force_threshold = 5.0
+    force_ramp = 20.0
+    knee_penalty = torch.clamp((knee_force - force_threshold) / force_ramp, min=0.0, max=1.0).sum(dim=1)
+    # 计算机身相对地面的高度
+    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
+    # P0、P1：不惩罚膝盖触地
+    # P2、P3：惩罚持续膝盖接触
+    knee_penalty_enabled = (env.recovery_stage >= 2)
+    reward = knee_penalty * knee_penalty_enabled.float()
+    return reward
+
+def rew_both_wheels_contact(env: BaseTask):
+    """
+    B1: 双轮接触奖励。
+    鼓励机器人在机身接近直立、达到一定高度后，
+    让左右轮子同时保持有效接触。
+    """
+
+    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
+    upright = env.projected_gravity[:, 2] < -0.90
+    wheel_fz = env.contact_forces[:, env.feet_indices, 2]
+
+    left_contact = wheel_fz[:, 0] > 1.0
+    right_contact = wheel_fz[:, 1] > 1.0
+
+    both_wheels = left_contact & right_contact
+    # 高度门控，避免机器人仍倒地时就追求双轮支撑
+    height_gate = torch.clamp((base_height - 0.10) / (0.38 - 0.10), min=0.0, max=1.0)
+    wheel_reward_enabled = env.recovery_stage >= 1
+    reward = (both_wheels.float() * upright.float() * height_gate * wheel_reward_enabled.float())
     return reward
 
 def pen_termination(env: BaseTask):
@@ -220,6 +297,64 @@ def pen_dof_pos_bias_l2(env: BaseTask):
     
     return bias_sum
 
+def rew_default_pose(env: BaseTask):
+    """
+    B2: 在恢复后期，引导腿部关节回到默认关节姿态。
+    不约束轮子的转动关节角度。
+    """
+
+    leg_ids = [0, 1, 2, 4, 5, 6]
+
+    pose_error = torch.sum(torch.square(env.dof_pos[:, leg_ids] - env.default_dof_pos[:, leg_ids]), dim=1)
+
+    upright = env.projected_gravity[:, 2] < -0.90
+    pose_reward_enabled = env.recovery_stage >= 2
+
+    reward = (
+        torch.exp(-pose_error / 0.1)
+        * upright.float()
+        * pose_reward_enabled.float()
+    )
+    return reward
+
+def rew_stand_success(env: BaseTask):
+    """
+    B2: 已进入稳定站立阶段后，奖励持续满足站立条件。
+    """
+
+    leg_ids = [0, 1, 2, 4, 5, 6]
+
+    pose_error = torch.mean(torch.abs(env.dof_pos[:, leg_ids] - env.default_dof_pos[:, leg_ids]), dim=1)
+
+    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
+
+    upright = env.projected_gravity[:, 2] < -0.90
+
+    wheel_fz = env.contact_forces[:, env.feet_indices, 2]
+
+    both_wheels = torch.all(wheel_fz > 5.0, dim=1)
+
+    knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1)
+
+    knees_clear = torch.all(knee_force < 5.0, dim=1)
+
+    base_ang_speed = torch.norm( env.base_ang_vel, dim=1)
+
+    base_contact_force = torch.norm(env.contact_forces[:, env.base_indice, :], dim=-1)
+
+    stand_ok = (upright
+                & (torch.abs(base_height - 0.40) < 0.04)
+                & both_wheels
+                & knees_clear
+                & (base_contact_force < 5.0)
+                & (pose_error < 0.12)
+                & (base_ang_speed < 0.50)
+    )
+
+    # 必须在状态机判定稳定站立后才持续给奖励
+    reward = (stand_ok.float() * (env.recovery_stage == 3).float())
+    return reward
+
 def knee_height(env: BaseTask):
     knee_height = env.rigid_body_states.view(env.num_envs, env.num_bodies, 13)[:, env.calf_indices, 0:3]
     relative_knee_height = knee_height[:,:,2] - env._get_heights_below_foot()
@@ -260,7 +395,7 @@ def wheel_adjustment(env: BaseTask):
     wheel_x_mean = wheel_x_mean.reshape(-1)
     reward = incline_x * wheel_x_mean > 0
     trunk_contact = torch.norm(env.contact_forces[:, 0, :], dim=-1) < 0.1
-    return reward * trunk_contact
+    return reward * trunk_contact # * env.stage_stand_mask
 
 def pen_no_fly_l2(env: BaseTask):
     contacts = env.contact_forces[:, env.feet_indices, 2] > 1.0
@@ -389,8 +524,19 @@ def torso_contact_force(env: BaseTask):
 def rew_wheel_contact_force(env: BaseTask):
     """鼓励轮子接触力的大小"""
     wheel_force = torch.sum(torch.abs(env.contact_forces[:, env.feet_indices, 2]), dim=1)
-    total_mass = torch.ones_like(wheel_force)* env.total_mass* 10
-    return torch.exp(-torch.abs(wheel_force - total_mass)* 0.05)
+    total_mass = torch.ones_like(wheel_force)* env.total_mass* 9.81
+    return torch.exp(-torch.abs(wheel_force - total_mass)* 0.05) 
+
+def rew_two_wheel_stand(env: BaseTask):
+    wheel_force = torch.sum(torch.abs(env.contact_forces[:, env.feet_indices, 2]), dim=1)
+    total_mass = torch.ones_like(wheel_force)* env.total_mass* 9.81
+    knee_force = torch.norm(
+        env.contact_forces[:, env.calf_indices, :],
+        dim=-1
+    )
+    knees_clear = torch.all(knee_force < 5.0, dim=1)
+    reward = torch.exp(-torch.abs(wheel_force - total_mass)* 0.05) * knees_clear
+    return reward
 
 def pen_joint_power_l2(env: BaseTask):
     """power pen"""
@@ -450,12 +596,12 @@ def leg_symmetry(env: BaseTask):
 
 def feet_distance(env: BaseTask):
         feet_distance = torch.abs(torch.norm(env.feet_state[:, 0, :2] - env.feet_state[:, 1, :2], dim=-1))
-        z_up = env.projected_gravity[:, 2] < -0.8
+        z_up = env.projected_gravity[:, 2] < -0.9
         # reward = torch.abs(feet_distance - self.cfg.rewards.min_feet_distance)
         reward = torch.clip(env.cfg.rewards.min_feet_distance - feet_distance, 0, 1) + \
                  torch.clip(feet_distance - env.cfg.rewards.max_feet_distance, 0, 1)
         return reward
-        
+
 def feet_pose_track(env: BaseTask):
     """基座朝上时，引导关节位形从当前姿态收敛到 target_pose。
 
@@ -466,7 +612,7 @@ def feet_pose_track(env: BaseTask):
     达成第一个目标位形后，继续用同样的方式引导关节位形靠近第二个目标位形 next_target_pose。
     """
     target_pose = torch.tensor([0.0, 1.1, -2.6, 0.0, 0.0, 1.1, -2.6, 0.0], device=env.device).repeat(env.num_envs, 1)
-    z_up = env.projected_gravity[:, 2] < -0.8
+    z_up = env.projected_gravity[:, 2] < -0.9
 
     # 惰性初始化插值所需的状态缓冲
     if not hasattr(env, "feet_track_start_pose"):
@@ -511,7 +657,7 @@ def feet_pose_track(env: BaseTask):
     next_error = torch.sum(torch.square(env.dof_pos[:, leg_list] - next_target_pose[:, leg_list]), dim=1)
     reward2 = env.feet_track_reached * torch.exp(-next_error / sigma) * z_up
 
-    return reward1 + reward2
+    return (reward1 + reward2) * env.stage_stand_mask
 # ----- Unitree reward -----
 
 def rew_left_foot_displacement(env: BaseTask):
@@ -788,4 +934,44 @@ def Unitree_hand_unmove(env: BaseTask) -> torch.Tensor:
     hand_actions = env.actions[:, env.hands_indices]
     hand_torques = env.torques[:, env.hands_indices]
     return (torch.sum(torch.square(hand_actions), dim=-1) + torch.sum(torch.square(hand_torques), dim=-1))* (base_height > 0.7)
+
+# ---------------------------------------------------------------------------
+# Force-guided (FTSR x FR-Net) staged reward terms for the Tita_wheel FF task.
+# These rely on per-env stage masks that the env computes every step:
+#   env.stage_flip_mask  - stage 1 (base flip recovery), 1.0 when active
+#   env.stage_stand_mask - stage 2 (stable standing), 1.0 when active
+# ---------------------------------------------------------------------------
+
+def rew_proj_gravity_gaussian(env: BaseTask):
+    """FR-Net upright-orientation reward, active during the flip stage.
+    Gaussian in projected gravity peaked at the upright pose (g_proj = -1)."""
+    g_proj = env.projected_gravity[:, 2]
+    sigma = env.cfg.rewards.upright_sigma
+    reward = torch.exp(-torch.square(g_proj + 1.0) / (2.0 * sigma * sigma))
+    return reward * env.stage_flip_mask
+
+def rew_stand_posture_exp(env: BaseTask):
+    """FR-Net posture convergence / FTSR leg-retraction reward, active during
+    the standing stage. Drives the leg joints toward the default standing pose."""
+    leg_idx = torch.tensor([0, 1, 2, 4, 5, 6], device=env.device, dtype=torch.long)
+    q_err = env.dof_pos[:, leg_idx] - env.default_dof_pos[:, leg_idx]
+    sigma = env.cfg.rewards.posture_sigma
+    reward = torch.exp(-torch.sum(torch.square(q_err), dim=1) / sigma)
+    return reward * env.stage_stand_mask
+
+def pen_base_contact_force_l2(env: BaseTask):
+    """Penalize base (torso) contact force, active during the standing stage.
+    Uses the per-link contact forces normalized by the robot total weight."""
+    base_idx = env.body_indices[0]
+    base_force = env.normalized_link_contact_forces[:, base_idx]
+    return torch.square(base_force) * env.stage_stand_mask
+
+def rew_wheel_support_exp(env: BaseTask):
+    """FTSR leg-usage reward, active during the standing stage: encourages the
+    total vertical wheel contact force to equal the robot weight."""
+    wheel_force = torch.sum(torch.abs(env.contact_forces[:, env.feet_indices, 2]), dim=1)
+    total_weight = torch.ones_like(wheel_force) * env.total_mass * 9.81
+    sigma = env.cfg.rewards.wheel_support_sigma
+    reward = torch.exp(-torch.abs(wheel_force - total_weight) / (sigma * total_weight))
+    return reward * env.stage_stand_mask
 

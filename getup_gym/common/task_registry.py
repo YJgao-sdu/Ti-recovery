@@ -95,7 +95,13 @@ class TaskRegistry:
             )
 
         train_cfg_dict = class_to_dict(train_cfg)
-        runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        runner_class_name = getattr(train_cfg, "runner_class_name", None)
+        if runner_class_name == "FFOnPolicyRunner":
+            from getup_gym.runners.on_policy_runner_ff import FFOnPolicyRunner
+
+            runner = FFOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        else:
+            runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
 
         if train_cfg.runner.resume:
             resume_path = get_load_path(

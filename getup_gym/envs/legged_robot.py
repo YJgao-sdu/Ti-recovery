@@ -66,6 +66,8 @@ class LeggedRobot(BaseTask):
             ):
                 self._base_force_pull_up()
 
+            self._apply_force_guidance_hook()
+
             if hasattr(self, "unactuated_time"):
                 self.actions *= (
                     self.real_episode_length_buf.unsqueeze(1) > self.unactuated_time
@@ -1307,6 +1309,11 @@ class LeggedRobot(BaseTask):
 
     def last_observations_save(self):
         self.observations_stack.append(self.obs_buf)
+
+    def _apply_force_guidance_hook(self):
+        """Hook for envs that apply an external guidance force each decimation
+        substep (e.g. force-guided fall recovery, FTSR-style). Default: no-op."""
+        pass
 
     def _base_force_pull_up(self):
         force_max = self.cfg.rewards.curriculum.base_pull_up_max

@@ -51,6 +51,16 @@ collision = RewardManagerCfg(
     weight=0.0,
 )
 
+pen_knee_contact = RewardManagerCfg(
+    func=pen_knee_contact,
+    weight=0.0,
+)
+
+rew_both_wheels_contact = RewardManagerCfg(
+    func=rew_both_wheels_contact,
+    weight=0.0,
+)
+
 pen_action_rate_l2 = RewardManagerCfg(
     func=pen_action_rate_l2,
     weight=0.0,
@@ -58,6 +68,16 @@ pen_action_rate_l2 = RewardManagerCfg(
 
 pen_dof_pos_bias_l2 = RewardManagerCfg(
     func=pen_dof_pos_bias_l2,
+    weight=0.0,
+)
+
+rew_stand_success = RewardManagerCfg(
+    func=rew_stand_success,
+    weight=0.0,
+)
+
+rew_default_pose = RewardManagerCfg(
+    func=rew_default_pose,
     weight=0.0,
 )
 
@@ -168,6 +188,10 @@ small_pos = RewardManagerCfg(
 
 rew_wheel_contact_force = RewardManagerCfg(
     func=rew_wheel_contact_force,
+    weight=0.0
+)
+rew_two_wheel_stand = RewardManagerCfg(
+    func=rew_two_wheel_stand,
     weight=0.0
 )
 
@@ -387,11 +411,15 @@ def reward_register(reward_manager: RewardManager):
     reward_manager.register_reward(pen_dof_acc_l2)
     reward_manager.register_reward(pen_dof_vel_l2)
     reward_manager.register_reward(collision)
+    reward_manager.register_reward(pen_knee_contact)
+    reward_manager.register_reward(rew_both_wheels_contact)
     reward_manager.register_reward(track_base_height_exp)
     reward_manager.register_reward(track_base_height_exp)
 
     reward_manager.register_reward(pen_action_rate_l2)
     reward_manager.register_reward(pen_dof_pos_bias_l2)
+    reward_manager.register_reward(rew_stand_success)
+    reward_manager.register_reward(rew_default_pose)
     reward_manager.register_reward(pen_two_leg_bias_l2)
     reward_manager.register_reward(pen_dof_pos_limits)
     reward_manager.register_reward(dof_vel_limits)
@@ -419,6 +447,7 @@ def reward_register(reward_manager: RewardManager):
     reward_manager.register_reward(torso_contact_force)
     reward_manager.register_reward(small_pos)
     reward_manager.register_reward(rew_wheel_contact_force)
+    reward_manager.register_reward(rew_two_wheel_stand)
     reward_manager.register_reward(pen_action_smoothness_l2)
     reward_manager.register_reward(pen_joint_power_l2)
     reward_manager.register_reward(hip_limits)

@@ -25,6 +25,7 @@ class Tita(LeggedRobot):
             cfg.observation_stack = cfg.env.observation_stack
 
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
+        self._init_recovery_state()
         self.unactuated_time = self.cfg.env.unactuated_timesteps * 0.02 / self.dt
 
     def compute_observations_without_noise(self):
@@ -165,6 +166,7 @@ class Tita(LeggedRobot):
             )
 
     def _reward_update(self):
+        self._update_recovery_stage()
         # 第一段：整体只有轮子受力
         reward_1 = torch.norm(self.contact_forces[:, 0, :], dim=-1) > 10
         # 第二段：站立到0.27m
@@ -364,8 +366,7 @@ class Tita(LeggedRobot):
             self.root_states[env_ids, 3:7] = random_quat(torch_rand_float(0, 1, (len(env_ids), 4), device=self.device))
 
         self.root_states[env_ids, 7:13] = torch_rand_float(
-            -0.5, 0.5, (len(env_ids), 6), device=self.device
-        )
+            -0.5, 0.5, (len(env_ids), 6), device=self.device)
         back_idx = torch.where(env_ids < 2000)[0]
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         back_idx = back_idx.to(dtype=torch.int32)
@@ -377,15 +378,28 @@ class Tita(LeggedRobot):
             len(env_ids_int32),
         )
 
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+
+        if len(env_ids) == 0:
+            return
+
+        if not hasattr(self, "recovery_stage"):
+            return
+
+        self.recovery_stage[env_ids] = 0
+        self.upright_count[env_ids] = 0
+        self.wheel_ready_count[env_ids] = 0
+        self.stand_success_count[env_ids] = 0
+        self.fall_count[env_ids] = 0
+        self.recovery_succeeded[env_ids] = False
+
     def _get_heights_below_foot(self):
-        """ Samples heights of the terrain at required points around each foot.
-
+        """ Samples heights of the terrain at required points around each foot. 
         Args:
-            env_ids (List[int], optional): Subset of environments for which to return the heights. Defaults to None.
-
+            env_ids (List[int], optional): Subset of environments for which to return the heights. Defaults to None.  
         Raises:
-            NameError: [description]
-
+            NameError: [description] 
         Returns:
             [type]: [description]
         """
@@ -394,8 +408,7 @@ class Tita(LeggedRobot):
         elif self.cfg.terrain.mesh_type == 'none':
             raise NameError("Can't measure height with terrain mesh type 'none'")
 
-        points = self.feet_state[:, :, :2]
-
+        points = self.feet_state[:, :, :2] 
         heights = self._get_terrain_heights_from_points(points)
 
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
@@ -413,3 +426,128 @@ class Tita(LeggedRobot):
         heights = torch.min(heights1, heights2)
         heights = torch.min(heights, heights3)
         return heights
+    
+    def _init_recovery_state(self):
+        n = self.num_envs
+        device = self.device
+
+        # 0: 姿态调整
+        # 1: 建立双轮支撑
+        # 2: 膝盖卸载
+        # 3: 稳定站立
+        self.recovery_stage = torch.zeros(n, dtype=torch.long, device=device)
+
+        # 阶段转换计数器
+        self.upright_count = torch.zeros(n, dtype=torch.long, device=device)
+        self.wheel_ready_count = torch.zeros(n, dtype=torch.long, device=device)
+        self.stand_success_count = torch.zeros(n, dtype=torch.long, device=device)
+        self.fall_count = torch.zeros(n, dtype=torch.long, device=device)
+
+        # 当前回合是否曾经成功恢复
+        self.recovery_succeeded = torch.zeros(n, dtype=torch.bool, device=device)
+
+    def _update_recovery_stage(self):
+        """根据每个环境自身的状态更新恢复阶段。"""
+        cfg = self.cfg.rewards.recovery
+    
+        # 1. 基座高度
+        base_height = torch.mean( self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+
+        # 2. 基座是否接近直立
+        upright = (self.projected_gravity[:, 2] < cfg.upright_z)
+
+        # 3. 左右轮子的垂直接触力
+        wheel_fz = self.contact_forces[:, self.feet_indices, 2]
+        both_wheels = torch.all(wheel_fz > cfg.wheel_contact_force, dim=1)
+
+        # 4. 左右膝接触力
+        knee_force = torch.norm(self.contact_forces[:, self.calf_indices, :], dim=-1)
+        knees_clear = torch.all(knee_force < cfg.knee_contact_force, dim=1)
+
+        # 5. 默认关节姿态误差，不约束轮子的转动角度
+        leg_ids = [0, 1, 2, 4, 5, 6]
+        pose_error = torch.mean(torch.abs(self.dof_pos[:, leg_ids] - self.default_dof_pos[:, leg_ids]), dim=1)
+
+        # 6. 基座角速度
+        base_ang_speed = torch.norm(self.base_ang_vel, dim=1)
+
+        # 7. 基座接触检测
+        # 当前项目已有 base_indice 的使用方式；
+        # 运行前仍需确认该索引确实指向基座碰撞刚体。
+        base_contact_force = torch.norm(self.contact_forces[:, self.base_indice, :], dim=-1)
+        base_clear = (base_contact_force < cfg.base_contact_force)
+
+        # 8. 将秒数换算成策略控制步数
+        transition_steps = max(1, int(cfg.transition_hold_s / self.dt))
+        stand_steps = max(1, int(cfg.stand_hold_s / self.dt))
+        fall_steps = max(1, int(cfg.fall_hold_s / self.dt))
+
+        # -------------------------------------------------
+        # 阶段 0 -> 阶段 1：姿态调整 -> 建立双轮支撑
+        # -------------------------------------------------
+        cond_01 = ((self.recovery_stage == 0)
+                    & upright
+                    & (base_height >= cfg.height_p0_to_p1))
+
+        self.upright_count = torch.where(cond_01,
+                            self.upright_count + 1,
+                            torch.zeros_like(self.upright_count))
+
+        enter_p1 = ((self.recovery_stage == 0) & (self.upright_count >= transition_steps))
+
+        self.recovery_stage[enter_p1] = 1
+        self.upright_count[enter_p1] = 0
+
+        # -------------------------------------------------
+        # 阶段 1 -> 阶段 2：建立双轮支撑 -> 膝盖卸载
+        # -------------------------------------------------
+        cond_12 = ((self.recovery_stage == 1)
+                    & upright
+                    & (base_height >= cfg.height_p1_to_p2)
+                    & both_wheels)
+
+        self.wheel_ready_count = torch.where(cond_12,
+                                    self.wheel_ready_count + 1,
+                                    torch.zeros_like(self.wheel_ready_count))
+
+        enter_p2 = ((self.recovery_stage == 1) & (self.wheel_ready_count >= transition_steps))
+        self.recovery_stage[enter_p2] = 2
+        self.wheel_ready_count[enter_p2] = 0
+
+        # -------------------------------------------------
+        # 阶段 2 -> 阶段 3：膝盖卸载 -> 稳定站立
+        # -------------------------------------------------
+        height_stable = (torch.abs(base_height - cfg.height_stand_target) <= cfg.height_stand_tolerance)
+
+        stand_condition = (
+            upright
+            & height_stable
+            & both_wheels
+            & knees_clear
+            & base_clear
+            & (pose_error < cfg.stand_pose_tolerance)
+            & (base_ang_speed < cfg.stand_ang_vel_tolerance)
+        )
+
+        cond_23 = ((self.recovery_stage == 2) & stand_condition)
+
+        self.stand_success_count = torch.where( cond_23, self.stand_success_count + 1,
+            torch.zeros_like(self.stand_success_count))
+
+        enter_p3 = ((self.recovery_stage == 2)& (self.stand_success_count >= stand_steps))
+
+        self.recovery_stage[enter_p3] = 3
+        self.recovery_succeeded[enter_p3] = True
+
+        # -------------------------------------------------
+        # 严重跌倒保护：
+        # 不因短暂失去接触就退回前期，但持续严重跌倒时允许重新恢复。
+        # -------------------------------------------------
+        severe_fall = ((self.recovery_stage >= 2) & (~upright) & (base_height < cfg.height_p1_to_p2))
+        self.fall_count = torch.where(severe_fall, self.fall_count + 1, torch.zeros_like(self.fall_count))
+        regress = ((self.recovery_stage >= 2) & (self.fall_count >= fall_steps))
+
+        self.recovery_stage[regress] = 1
+        self.fall_count[regress] = 0
+        self.wheel_ready_count[regress] = 0
+        self.stand_success_count[regress] = 0

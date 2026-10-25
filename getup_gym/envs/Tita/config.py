@@ -242,6 +242,10 @@ class TitaGetupCfg(BaseConfig):
             pen_two_leg_bias_l2 = -0.02
             pen_no_fly_l2 = -2.0
             rew_wheel_contact_force = 4.0
+            pen_knee_contact = -2.0
+            rew_both_wheels_contact = 1.0
+            rew_default_pose = 2.0
+            rew_stand_success = 4.0
 
         class reward_group_3:
             pen_termination = -100
@@ -253,7 +257,13 @@ class TitaGetupCfg(BaseConfig):
             pen_two_leg_bias_l2 = -0.02
             pen_dof_pos_bias_l2 = -0.14
             track_base_height_exp = 6.0
-            wheel_adjustment = 0.5
+            # wheel_adjustment = 0.5
+            rew_wheel_contact_force = 4.0
+            pen_knee_contact = -2.0
+            rew_both_wheels_contact = 1.0
+            rew_default_pose = 2.0
+            rew_stand_success = 4.0
+            # collision = -1.0
 
         class reward_group_4:
             pen_termination = -500.0           #
@@ -266,21 +276,24 @@ class TitaGetupCfg(BaseConfig):
             pen_action_rate_l2 = -0.1
             pen_dof_pos_bias_l2 = -0.12
             pen_no_fly_l2 = -0.2
-            track_base_height_exp = 8.0
-            feet_distance = -1.0
+            track_base_height_exp = 5.0
+            feet_distance = -2.0
             pen_max_velocity_l2 = 1.0
             pen_dof_pos_limits = -5.0
 
             pen_torque_limits = -0.05
             pen_action_smoothness_l2 = -0.02
             pen_joint_power_l2 = -1.0e-4
-            wheel_adjustment = 1.0
-            collision = -0.0  
+            # wheel_adjustment = 1.0
+            rew_wheel_contact_force = 4.0
+            pen_knee_contact = -2.0
+            rew_both_wheels_contact = 1.0
+            rew_default_pose = 2.0
+            rew_stand_success = 4.0
+            # collision = -2.0
 
         min_feet_distance = 0.55
-        max_feet_distance = 0.64
-            
-            
+        max_feet_distance = 0.64       
 
         class curriculum:
             """Stage-wise curriculum: reward groups, target heights, pull-up assistance."""
@@ -290,6 +303,34 @@ class TitaGetupCfg(BaseConfig):
             base_pull_up_max = 600.0
             using_pull_up_end = True
             pull_up_end_epochs = 3000
+        
+        class recovery:
+            # 机身姿态门槛
+            upright_z = -0.90
+
+            # 阶段转换的高度门槛
+            height_p0_to_p1 = 0.07
+            height_p1_to_p2 = 0.24
+
+            # 最终站立高度
+            height_stand_target = 0.40
+            height_stand_tolerance = 0.04
+
+            # 接触力门槛
+            wheel_contact_force = 5.0
+            knee_contact_force = 5.0
+            base_contact_force = 5.0
+
+            # 连续满足条件的时间，以秒为单位
+            transition_hold_s = 0.20
+            stand_hold_s = 0.50
+            fall_hold_s = 0.50
+
+            # 默认关节姿态误差
+            stand_pose_tolerance = 0.12
+
+            # 稳定站立时允许的基座角速度
+            stand_ang_vel_tolerance = 0.50
 
         class terminations:
             """Extra termination conditions beyond the default time-out."""
@@ -436,7 +477,7 @@ class TitaGetUpPPO(BaseConfig):
         )
         
         num_steps_per_env = 24      
-        max_iterations = 8000        
+        max_iterations = 10000        
 
         # logging
         save_interval = 500          # check for potential saves every this many iterations
