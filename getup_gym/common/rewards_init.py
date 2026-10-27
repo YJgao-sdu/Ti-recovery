@@ -76,6 +76,11 @@ rew_stand_success = RewardManagerCfg(
     weight=0.0,
 )
 
+rew_deadpoint_escape = RewardManagerCfg(
+    func=rew_deadpoint_escape,
+    weight=0.0,
+)
+
 rew_default_pose = RewardManagerCfg(
     func=rew_default_pose,
     weight=0.0,
@@ -419,6 +424,7 @@ def reward_register(reward_manager: RewardManager):
     reward_manager.register_reward(pen_action_rate_l2)
     reward_manager.register_reward(pen_dof_pos_bias_l2)
     reward_manager.register_reward(rew_stand_success)
+    reward_manager.register_reward(rew_deadpoint_escape)
     reward_manager.register_reward(rew_default_pose)
     reward_manager.register_reward(pen_two_leg_bias_l2)
     reward_manager.register_reward(pen_dof_pos_limits)

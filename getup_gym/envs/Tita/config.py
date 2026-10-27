@@ -59,7 +59,7 @@ class TitaGetupCfg(BaseConfig):
         random_uniform_terrain_max_height = 0.03
     
     class env():
-        num_envs = 4000
+        num_envs = 8192
         num_envs_teacher = 3000
         num_actions = 8        
         layer_size = 12             # encoder's layer size    
@@ -82,9 +82,9 @@ class TitaGetupCfg(BaseConfig):
         class ranges():
             lin_vel_x_only = 1500
             without_lin_vel_y = 500 # not add lin_vel_x_only
-            lin_vel_x = [-0, 0]  # min max [m/s] 0.4
+            lin_vel_x = [-1.0, 1.0]  # min max [m/s] 0.4
             lin_vel_y = [-0.0, 0.0]  # min max [m/s]
-            ang_vel_yaw = [-0.0, 0.0]  # min max [rad/s]0.5
+            ang_vel_yaw = [-0.8, 0.8]  # min max [rad/s]0.5
             angle_pitch = [-0.2, 0.2]
             angle_roll = [-0.2, 0.2]
             rew_base_height = [0.24, 0.4]
@@ -246,6 +246,9 @@ class TitaGetupCfg(BaseConfig):
             rew_both_wheels_contact = 1.0
             rew_default_pose = 2.0
             rew_stand_success = 4.0
+            rew_deadpoint_escape = 1.0 
+            wheel_adjustment = 1.0
+            leg_symmetry = 1.0
 
         class reward_group_3:
             pen_termination = -100
@@ -257,12 +260,14 @@ class TitaGetupCfg(BaseConfig):
             pen_two_leg_bias_l2 = -0.02
             pen_dof_pos_bias_l2 = -0.14
             track_base_height_exp = 6.0
-            # wheel_adjustment = 0.5
+            wheel_adjustment = 1.0
             rew_wheel_contact_force = 4.0
             pen_knee_contact = -2.0
             rew_both_wheels_contact = 1.0
             rew_default_pose = 2.0
             rew_stand_success = 4.0
+            rew_deadpoint_escape = 1.0 
+            leg_symmetry = 1.0
             # collision = -1.0
 
         class reward_group_4:
@@ -284,16 +289,19 @@ class TitaGetupCfg(BaseConfig):
             pen_torque_limits = -0.05
             pen_action_smoothness_l2 = -0.02
             pen_joint_power_l2 = -1.0e-4
-            # wheel_adjustment = 1.0
+            wheel_adjustment = 1.0
             rew_wheel_contact_force = 4.0
             pen_knee_contact = -2.0
             rew_both_wheels_contact = 1.0
             rew_default_pose = 2.0
             rew_stand_success = 4.0
+            rew_deadpoint_escape = 1.0 
+            leg_symmetry = 1.0
             # collision = -2.0
 
         min_feet_distance = 0.55
-        max_feet_distance = 0.64       
+        max_feet_distance = 0.64   
+        leg_symmetry_tracking_sigma = 0.001
 
         class curriculum:
             """Stage-wise curriculum: reward groups, target heights, pull-up assistance."""
@@ -331,6 +339,30 @@ class TitaGetupCfg(BaseConfig):
 
             # 稳定站立时允许的基座角速度
             stand_ang_vel_tolerance = 0.50
+            # 死点检测的基座高度范围
+            deadpoint_height_min = 0.24
+
+            # 双轮 + 至少一侧膝盖持续接触的最短时间
+            deadpoint_hold_s = 1.20
+
+            # 在上述接触模式下，没有明显高度进展的最短时间
+            deadpoint_no_progress_s = 0.75
+
+            # 基座高度至少增加多少才认为出现了有效进展，单位 m
+            deadpoint_min_height_progress = 0.015
+
+            # 脱困奖励的高度变化归一化尺度，单位 m
+            deadpoint_progress_scale_m = 0.02
+
+            # 困难状态回放缓冲区
+            deadpoint_replay_enabled = True
+            deadpoint_replay_capacity = 512
+
+            # 缓冲区至少收集这么多状态后才启用重采样
+            deadpoint_replay_min_size = 32
+
+            # 每次 episode 重置时，从困难状态缓冲区采样的概率
+            deadpoint_replay_probability = 0.15
 
         class terminations:
             """Extra termination conditions beyond the default time-out."""
@@ -477,7 +509,7 @@ class TitaGetUpPPO(BaseConfig):
         )
         
         num_steps_per_env = 24      
-        max_iterations = 10000        
+        max_iterations = 12000        
 
         # logging
         save_interval = 500          # check for potential saves every this many iterations

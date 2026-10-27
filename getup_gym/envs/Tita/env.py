@@ -26,6 +26,7 @@ class Tita(LeggedRobot):
 
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
         self._init_recovery_state()
+        self._init_deadpoint_state()
         self.unactuated_time = self.cfg.env.unactuated_timesteps * 0.02 / self.dt
 
     def compute_observations_without_noise(self):
@@ -167,6 +168,7 @@ class Tita(LeggedRobot):
 
     def _reward_update(self):
         self._update_recovery_stage()
+        self._update_deadpoint_detector()
         # 第一段：整体只有轮子受力
         reward_1 = torch.norm(self.contact_forces[:, 0, :], dim=-1) > 10
         # 第二段：站立到0.27m
@@ -379,20 +381,140 @@ class Tita(LeggedRobot):
         )
 
     def reset_idx(self, env_ids):
+        """B3:重置环境:并以一定概率重采样历史死点状态。"""
+
+        if env_ids.numel() == 0:
+            return
+
+        cfg = self.cfg.rewards.recovery
+        # --------------------------------------------------
+        # A. 先记录刚结束的 episode 是否出现过死点
+        # --------------------------------------------------
+        if hasattr(self, "deadpoint_ever"):
+            deadpoint_done = (self.deadpoint_ever[env_ids].detach().clone())
+        else:
+            deadpoint_done = torch.zeros(env_ids.numel(), dtype=torch.bool, device=self.device)
+
+        # --------------------------------------------------
+        # B. 决定哪些重置环境使用困难状态回放
+        # --------------------------------------------------
+        replay_ids = env_ids[:0]
+        replay_enabled = (
+            getattr(cfg, "deadpoint_replay_enabled", False)
+            and hasattr(self, "deadpoint_replay_size")
+            and self.deadpoint_replay_size
+            >= cfg.deadpoint_replay_min_size
+        )
+
+        if replay_enabled and cfg.deadpoint_replay_probability > 0:
+            use_replay = (torch.rand(env_ids.numel(), device=self.device) < cfg.deadpoint_replay_probability)
+            replay_ids = env_ids[use_replay]
+
+        # --------------------------------------------------
+        # C. 执行原框架的重置
+        #    包含 DOF、root state、命令和历史缓存等
+        # --------------------------------------------------
         super().reset_idx(env_ids)
+        # --------------------------------------------------
+        # D. 覆盖部分环境的初始状态
+        # --------------------------------------------------
+        if replay_ids.numel() > 0:
+            slots = torch.randint(
+                low=0, high=self.deadpoint_replay_size, size=(replay_ids.numel(),), device=self.device)
 
-        if len(env_ids) == 0:
-            return
+            # 恢复相对环境原点保存的基座状态
+            self.root_states[replay_ids] = (self.deadpoint_replay_root[slots])
+            self.root_states[replay_ids, :3] += (self.env_origins[replay_ids])
 
-        if not hasattr(self, "recovery_stage"):
-            return
+            # 恢复关节位置和速度
+            dof_state_view = self.dof_state.view(self.num_envs, self.num_dof, 2)
+            dof_state_view[replay_ids] = (self.deadpoint_replay_dof[slots])
+            replay_ids_int32 = replay_ids.to(torch.int32)
 
-        self.recovery_stage[env_ids] = 0
-        self.upright_count[env_ids] = 0
-        self.wheel_ready_count[env_ids] = 0
-        self.stand_success_count[env_ids] = 0
-        self.fall_count[env_ids] = 0
-        self.recovery_succeeded[env_ids] = False
+            # 写回 Isaac Gym
+            self.gym.set_actor_root_state_tensor_indexed(self.sim,
+                gymtorch.unwrap_tensor(self.root_states),
+                gymtorch.unwrap_tensor(replay_ids_int32),
+                replay_ids_int32.numel(),
+            )
+
+            self.gym.set_dof_state_tensor_indexed(self.sim,
+                gymtorch.unwrap_tensor(self.dof_state),
+                gymtorch.unwrap_tensor(replay_ids_int32),
+                replay_ids_int32.numel(),
+            )
+
+            # 刷新仿真状态
+            self.gym.refresh_actor_root_state_tensor(self.sim)
+            self.gym.refresh_dof_state_tensor(self.sim)
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            self.gym.refresh_net_contact_force_tensor(self.sim)
+
+            # 同步基座观测缓存
+            self.base_quat[replay_ids] = (self.root_states[replay_ids, 3:7])
+
+            self.base_lin_vel[replay_ids] = quat_rotate_inverse(
+                self.base_quat[replay_ids], self.root_states[replay_ids, 7:10])
+
+            self.base_ang_vel[replay_ids] = quat_rotate_inverse(
+                self.base_quat[replay_ids], self.root_states[replay_ids, 10:13])
+
+            self.projected_gravity[replay_ids] = quat_rotate_inverse(
+                self.base_quat[replay_ids], self.gravity_vec[replay_ids])
+
+            # 同步轮子位置缓存
+            self.feet_state = self.rigid_body_states[:, self.feet_indices, :]
+            self.foot_positions = self.rigid_body_states.view(self.num_envs, self.num_bodies, 13)[:, self.feet_indices, 0:3]
+            self.last_foot_positions[replay_ids] = (self.foot_positions[replay_ids])
+
+            # 清除回放环境的观测历史
+            if hasattr(self, "observations_stack"):
+                for history in self.observations_stack:
+                    if (isinstance(history, torch.Tensor) and history.shape[0] == self.num_envs):
+                        history[replay_ids] = 0.0
+
+            # 回放的起点就是一个已知困难状态，
+            # 因此直接开启脱困奖励，不必再次等待死点检测。
+            self.commands[replay_ids] = 0.0
+
+        # --------------------------------------------------
+        # E. 清空 B2 阶段状态
+        # --------------------------------------------------
+        if hasattr(self, "recovery_stage"):
+            self.recovery_stage[env_ids] = 0
+            self.upright_count[env_ids] = 0
+            self.wheel_ready_count[env_ids] = 0
+            self.stand_success_count[env_ids] = 0
+            self.fall_count[env_ids] = 0
+            self.recovery_succeeded[env_ids] = False
+
+        # --------------------------------------------------
+        # F. 清空 B3 当前 episode 的检测状态
+        # --------------------------------------------------
+        if hasattr(self, "deadpoint_candidate_steps"):
+            self.deadpoint_candidate_steps[env_ids] = 0
+            self.deadpoint_no_progress_steps[env_ids] = 0
+            self.deadpoint_best_height[env_ids] = -1e6
+            self.deadpoint_active[env_ids] = False
+            self.deadpoint_ever[env_ids] = False
+            self.deadpoint_prev_height[env_ids] = 0.0
+            self.deadpoint_height_delta[env_ids] = 0.0
+
+        # 对于回放环境，保留“该 episode 从困难状态开始”的标志
+        if replay_ids.numel() > 0:
+            self.deadpoint_ever[replay_ids] = True
+            replay_base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+            self.deadpoint_prev_height[replay_ids] = (replay_base_height[replay_ids])
+
+        # --------------------------------------------------
+        # G. 将死点统计写入训练日志
+        # --------------------------------------------------
+        if (hasattr(self, "extras")
+            and "episode" in self.extras
+            and deadpoint_done.numel() > 0):
+            self.extras["episode"]["deadpoint_episode_rate"] = (deadpoint_done.float().mean())
+            self.extras["episode"]["deadpoint_episode_count"] = (deadpoint_done.float().sum())
+            self.extras["episode"]["deadpoint_replay_rate"] = (replay_ids.numel() / env_ids.numel())
 
     def _get_heights_below_foot(self):
         """ Samples heights of the terrain at required points around each foot. 
@@ -446,6 +568,220 @@ class Tita(LeggedRobot):
         # 当前回合是否曾经成功恢复
         self.recovery_succeeded = torch.zeros(n, dtype=torch.bool, device=device)
 
+    def _init_deadpoint_state(self):
+        """B3:初始化死点检测器和困难状态回放缓冲区。"""
+
+        n = self.num_envs
+        device = self.device
+        cfg = self.cfg.rewards.recovery
+
+        # 当前连续处于候选死点状态的步数
+        self.deadpoint_candidate_steps = torch.zeros(n, dtype=torch.long, device=device)
+
+        # 当前没有明显高度进展的连续步数
+        self.deadpoint_no_progress_steps = torch.zeros(n, dtype=torch.long, device=device)
+
+        # 候选状态期间达到过的最高基座高度
+        self.deadpoint_best_height = torch.full((n,), -1e6, dtype=torch.float, device=device)
+
+        # 当前是否满足死点条件
+        self.deadpoint_active = torch.zeros(n, dtype=torch.bool, device=device)
+
+        # 本回合是否曾经检测到死点
+        self.deadpoint_ever = torch.zeros(n, dtype=torch.bool, device=device)
+
+        # 死点事件累计次数，供调试使用
+        self.deadpoint_events = torch.zeros(n, dtype=torch.long, device=device)
+
+        # 高度变化奖励需要的历史状态
+        self.deadpoint_prev_height = torch.zeros(n, dtype=torch.float, device=device)
+        self.deadpoint_height_delta = torch.zeros(n, dtype=torch.float, device=device)
+
+        # 困难状态回放缓冲区
+        capacity = int(cfg.deadpoint_replay_capacity)
+        self.deadpoint_replay_root = torch.zeros((capacity, 13), dtype=torch.float, device=device)
+        self.deadpoint_replay_dof = torch.zeros((capacity, self.num_dof, 2), dtype=torch.float, device=device)
+
+        # Python 整数记录环形缓冲区的写入位置与有效样本数
+        self.deadpoint_replay_ptr = 0
+        self.deadpoint_replay_size = 0
+
+    def _store_deadpoint_states(self, env_ids):
+        """
+        将检测到的死点状态保存到回放缓冲区。
+        保存内容：
+        1. 基座完整根状态(13 维）
+        2. 全部关节的位置和速度
+
+        基座位置改为相对环境原点的坐标，
+        这样可以在其他并行环境中重放。
+        """
+        if env_ids.numel() == 0:
+            return
+
+        capacity = self.deadpoint_replay_root.shape[0]
+
+        # 单次事件过多时，仅保留最后 capacity 个状态
+        if env_ids.numel() > capacity:
+            env_ids = env_ids[-capacity:]
+
+        # 保存根状态
+        root_snapshot = self.root_states[env_ids].detach().clone()
+
+        # 转成相对当前环境原点的位置
+        root_snapshot[:, :3] -= self.env_origins[env_ids]
+
+        # 初始化时清零基座线速度和角速度，减少回放瞬间的速度干扰
+        root_snapshot[:, 7:13] = 0.0
+
+        # 保存 DOF 状态，兼容展平或视图形式的 dof_state
+        dof_state_view = self.dof_state.view(self.num_envs, self.num_dof, 2)
+        dof_snapshot = (dof_state_view[env_ids].detach().clone())
+
+        # 保留关节位置，清零关节速度
+        dof_snapshot[:, :, 1] = 0.0
+        count = env_ids.numel()
+        slots = (torch.arange(count, device=self.device) + self.deadpoint_replay_ptr) % capacity
+
+        self.deadpoint_replay_root[slots] = root_snapshot
+        self.deadpoint_replay_dof[slots] = dof_snapshot
+
+        self.deadpoint_replay_ptr = (self.deadpoint_replay_ptr + count) % capacity
+        self.deadpoint_replay_size = min(capacity, self.deadpoint_replay_size + count)
+
+    def _update_deadpoint_detector(self):
+        """B3:检测持续三点支撑且缺乏恢复进展的局部最优。"""
+
+        cfg = self.cfg.rewards.recovery
+        # 1. 基座高度
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        # 2. 基座接近直立
+        upright = (self.projected_gravity[:, 2] < cfg.upright_z)
+        # 3. 左右轮均有足够的垂直接触力
+        wheel_fz = self.contact_forces[:, self.feet_indices, 2]
+        both_wheels = torch.any(wheel_fz > cfg.wheel_contact_force, dim=1)
+        # 4. 至少一侧膝盖有明显接触力
+        knee_force = torch.norm(self.contact_forces[:, self.calf_indices, :], dim=-1)
+        any_knee = torch.any(knee_force > cfg.knee_contact_force, dim=1)
+        # 5. 排除已经完成恢复的环境
+        height_in_deadpoint_range = (
+            (base_height >= cfg.deadpoint_height_min)
+            & (base_height < cfg.height_stand_target - cfg.height_stand_tolerance)
+        )
+
+        candidate = (
+            both_wheels
+            & any_knee
+            & upright
+            & height_in_deadpoint_range
+            & (self.recovery_stage < 3)
+        )
+
+        # 6. 记录已触发死点后的基座高度变化
+        self.deadpoint_height_delta.zero_()
+        tracked = self.deadpoint_ever
+        self.deadpoint_height_delta[tracked] = (base_height[tracked] - self.deadpoint_prev_height[tracked])
+        self.deadpoint_prev_height[:] = base_height
+
+        # 7. 进入候选状态的第一步
+        start = candidate & (self.deadpoint_candidate_steps == 0)
+        best_before = torch.where(start, base_height, self.deadpoint_best_height)
+
+        # 只有高度至少提高指定幅度，才算有效进展
+        improved = candidate & (base_height >= best_before + cfg.deadpoint_min_height_progress)
+
+        # 8. 更新候选死点持续时间
+        self.deadpoint_candidate_steps = torch.where(
+            candidate,
+            self.deadpoint_candidate_steps + 1,
+            torch.zeros_like(self.deadpoint_candidate_steps),
+        )
+
+        # 9. 更新无进展计数
+        reset_no_progress = start | improved
+        next_no_progress = torch.where(
+            reset_no_progress,
+            torch.zeros_like(self.deadpoint_no_progress_steps),
+            self.deadpoint_no_progress_steps + 1,
+        )
+
+        self.deadpoint_no_progress_steps = torch.where(
+            candidate,
+            next_no_progress,
+            torch.zeros_like(self.deadpoint_no_progress_steps),
+        )
+
+        # 10. 更新候选状态期间的最高高度
+        self.deadpoint_best_height = torch.where(candidate,
+            torch.maximum(best_before, base_height),
+            torch.full_like(base_height, -1e6),
+        )
+
+        # 11. 将秒数转换成控制步数
+        hold_steps = max(1, int(round(cfg.deadpoint_hold_s / self.dt)))
+        no_progress_steps = max(1, int(round(cfg.deadpoint_no_progress_s / self.dt)))
+
+        # 12. 持续接触 + 长时间没有进展，才确认死点
+        self.deadpoint_active = (candidate
+            & (self.deadpoint_candidate_steps >= hold_steps)
+            & (self.deadpoint_no_progress_steps >= no_progress_steps)
+        )
+
+        # 13. 记录本回合第一次死点事件
+        new_event = (self.deadpoint_active & (~self.deadpoint_ever))
+        self.deadpoint_ever |= self.deadpoint_active
+        self.deadpoint_events[new_event] += 1
+
+        if torch.any(new_event):
+            event_ids = torch.where(new_event)[0]
+
+            # 目录与文件路径（只计算一次，缓存到实例属性）
+            if not hasattr(self, "_deadpoint_md_path"):
+                import os
+                log_dir = "/home/gyj/rsl_rl/getup_gym/logs/B3"
+                os.makedirs(log_dir, exist_ok=True)
+                self._deadpoint_md_path = os.path.join(log_dir, "deadpoint_events1.md")
+
+                # 文件不存在则写表头
+                if not os.path.exists(self._deadpoint_md_path):
+                    with open(self._deadpoint_md_path, "w", encoding="utf-8") as f:
+                        f.write("# B3 Deadpoint Events\n\n")
+                        f.write("| 序号 | common_step_counter | env_id | base_height | candidate_steps | no_progress_steps |\n")
+                        f.write("|---|---|---|---|---|---|\n")
+                    self._deadpoint_md_counter = 0
+
+            if not hasattr(self, "_deadpoint_md_counter"):
+                self._deadpoint_md_counter = 0
+
+            # 逐 env 写一行
+            with open(self._deadpoint_md_path, "a", encoding="utf-8") as f:
+                for env_id in event_ids.tolist():
+                    self._deadpoint_md_counter += 1
+                    line = (
+                        f"| {self._deadpoint_md_counter} "
+                        f"| {self.common_step_counter} "
+                        f"| {env_id} "
+                        f"| {base_height[env_id].item():.4f} "
+                        f"| {self.deadpoint_candidate_steps[env_id].item()} "
+                        f"| {self.deadpoint_no_progress_steps[env_id].item()} |\n"
+                    )
+                    f.write(line)
+                    print(
+                        f"[Deadpoint] env_id={env_id}  "
+                        f"common_step_counter={self.common_step_counter}  "
+                        f"base_height={base_height[env_id].item():.4f}"
+                    )
+
+        # 第一次触发时不把之前的高度变化算作脱困进展
+        self.deadpoint_prev_height[new_event] = (base_height[new_event])
+        self.deadpoint_height_delta[new_event] = 0.0
+        # 14. 保存真实死点状态
+        if (cfg.deadpoint_replay_enabled and torch.any(new_event)):
+            event_ids = torch.where(new_event)[0]
+            self._store_deadpoint_states(event_ids)
+            
+
+
     def _update_recovery_stage(self):
         """根据每个环境自身的状态更新恢复阶段。"""
         cfg = self.cfg.rewards.recovery
@@ -458,7 +794,7 @@ class Tita(LeggedRobot):
 
         # 3. 左右轮子的垂直接触力
         wheel_fz = self.contact_forces[:, self.feet_indices, 2]
-        both_wheels = torch.all(wheel_fz > cfg.wheel_contact_force, dim=1)
+        both_wheels = torch.any(wheel_fz > cfg.wheel_contact_force, dim=1)
 
         # 4. 左右膝接触力
         knee_force = torch.norm(self.contact_forces[:, self.calf_indices, :], dim=-1)

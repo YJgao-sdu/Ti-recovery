@@ -251,7 +251,7 @@ def track_ang_vel_yaw_exp(env: BaseTask):
     base_height = torch.mean(env.rigid_body_states[:, env.base_indices, 2] - env.measured_heights, dim=1)
     ang_vel_error = torch.square(env.commands[:, 2] - env.base_ang_vel[:, 2])
     lin_vel_sigma = env.cfg.rewards.tracking_sigma
-    return torch.exp(-ang_vel_error / 0.12)
+    return torch.exp(-ang_vel_error / 0.12) * (base_height >= 0.36)
 
 def feet_air_time(env: BaseTask):
     # Reward long steps
@@ -321,39 +321,73 @@ def rew_stand_success(env: BaseTask):
     """
     B2: 已进入稳定站立阶段后，奖励持续满足站立条件。
     """
-
-    leg_ids = [0, 1, 2, 4, 5, 6]
-
+    leg_ids = [0, 1, 2, 4, 5, 6] 
     pose_error = torch.mean(torch.abs(env.dof_pos[:, leg_ids] - env.default_dof_pos[:, leg_ids]), dim=1)
-
-    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
-
-    upright = env.projected_gravity[:, 2] < -0.90
-
-    wheel_fz = env.contact_forces[:, env.feet_indices, 2]
-
-    both_wheels = torch.all(wheel_fz > 5.0, dim=1)
-
-    knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1)
-
-    knees_clear = torch.all(knee_force < 5.0, dim=1)
-
-    base_ang_speed = torch.norm( env.base_ang_vel, dim=1)
-
-    base_contact_force = torch.norm(env.contact_forces[:, env.base_indice, :], dim=-1)
-
-    stand_ok = (upright
+    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1) 
+    upright = env.projected_gravity[:, 2] < -0.90 
+    wheel_fz = env.contact_forces[:, env.feet_indices, 2] 
+    both_wheels = torch.all(wheel_fz > 5.0, dim=1) 
+    knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1) 
+    knees_clear = torch.all(knee_force < 5.0, dim=1) 
+    base_ang_speed = torch.norm( env.base_ang_vel, dim=1) 
+    base_contact_force = torch.norm(env.contact_forces[:, env.base_indice, :], dim=-1) 
+    stand_ok = (upright 
                 & (torch.abs(base_height - 0.40) < 0.04)
                 & both_wheels
                 & knees_clear
                 & (base_contact_force < 5.0)
                 & (pose_error < 0.12)
                 & (base_ang_speed < 0.50)
-    )
-
+    ) 
     # 必须在状态机判定稳定站立后才持续给奖励
     reward = (stand_ok.float() * (env.recovery_stage == 3).float())
     return reward
+
+def rew_deadpoint_escape(env: BaseTask):
+    """
+    B3:死点脱困奖励。
+
+    只在本回合已经检测到死点，或从死点状态重采样开始后启用。
+
+    鼓励：
+    1. 基座高度向目标高度增加；
+    2. 双轮保持接触；
+    3. 膝盖离地；
+    4. 基座接近直立。
+    """
+
+    if not hasattr(env, "deadpoint_ever"):
+        return torch.zeros(env.num_envs, device=env.device)
+
+    cfg = env.cfg.rewards.recovery
+    active = env.deadpoint_ever.float()
+
+    # 当前基座高度
+    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1)
+
+    # 双轮接触
+    wheel_fz = env.contact_forces[:, env.feet_indices, 2]
+    both_wheels = torch.all(wheel_fz > cfg.wheel_contact_force, dim=1)
+
+    # 双膝均离地
+    knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1)
+    knees_clear = torch.all(knee_force < cfg.knee_contact_force, dim=1)
+
+    # 机身接近直立
+    upright = (env.projected_gravity[:, 2] < cfg.upright_z)
+
+    # 1. 高度进展奖励：上升为正，下降为负
+    height_progress = (env.deadpoint_height_delta / cfg.deadpoint_progress_scale_m).clamp(-1.0, 1.0)
+
+    # 2. 脱离膝盖支撑后的双轮直立奖励
+    escape_condition = (both_wheels & knees_clear & upright)
+    escape_reward = escape_condition.float()
+
+    # 3. 基座高度的平滑得分
+    height_score = ((base_height - cfg.deadpoint_height_min)
+        / (cfg.height_stand_target - cfg.deadpoint_height_min)).clamp(0.0, 1.0)
+    reward = (height_progress + 1.5 * escape_reward + 0.25 * height_score)
+    return active * reward
 
 def knee_height(env: BaseTask):
     knee_height = env.rigid_body_states.view(env.num_envs, env.num_bodies, 13)[:, env.calf_indices, 0:3]
@@ -592,7 +626,8 @@ def leg_symmetry(env: BaseTask):
         foot_positions_base[:, i, :] = quat_rotate_inverse(env.base_quat, foot_positions_base[:, i, :] )
     leg_symmetry_err = (abs(foot_positions_base[:,0,0])-abs(foot_positions_base[:,1,0]))
     reward = torch.exp(-(leg_symmetry_err ** 2)/ env.cfg.rewards.leg_symmetry_tracking_sigma)
-    return reward
+    leg_symmetry_enabled = (env.recovery_stage >= 2)
+    return reward * leg_symmetry_enabled
 
 def feet_distance(env: BaseTask):
         feet_distance = torch.abs(torch.norm(env.feet_state[:, 0, :2] - env.feet_state[:, 1, :2], dim=-1))
