@@ -311,7 +311,7 @@ class Tita(LeggedRobot):
                 self.motor_strength[:, :] * self.torques[:, self.motor_rigid_idx]
             )
         
-
+        # print("不限幅力矩:", torques[:, [2, 3]])
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _action_scale_update(self):

@@ -1329,10 +1329,10 @@ class LeggedRobot(BaseTask):
             device=self.device,
         )
         time_coeff = torch.clamp(time_coeff, 0.0, 1.0)
-        if not getattr(self.cfg.rewards, "using_pull_up_end", True):
+        if not getattr(self.cfg.rewards.curriculum, "using_pull_up_end", True):
             time_coeff = torch.ones_like(time_coeff)
 
-        base_height_target = getattr(self.cfg.rewards, "base_height_target", 0.5)
+        base_height_target = getattr(self.cfg.rewards.curriculum, "base_height_target", 0.5)
         force_scale = (
             (base_height_target - base_height) / base_height_target
         ) * force_max * time_coeff

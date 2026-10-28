@@ -222,16 +222,17 @@ def dof_vel_limits(env: BaseTask):
 
 def pen_torque_limits(env: BaseTask):
     # penalize torques too close to the limit
-    return torch.sum(
+    reward = torch.sum(
         (torch.abs(env.torques) - env.torque_limits * env.cfg.rewards.soft_torque_limit).clip(min=0.0),
         dim=1,
     )
+    return reward
 
 def track_lin_vel_xy_exp(env: BaseTask):
     base_height = torch.mean(env.rigid_body_states[:, env.base_indices, 2] - env.measured_heights, dim=1)
     # Tracking of linear velocity commands (xy axes)
     lin_vel_sigma = env.cfg.rewards.tracking_sigma
-    lin_vel_error = torch.sum(torch.square(env.commands[:, :2] - env.base_lin_vel[:, :2]),dim=1)    
+    lin_vel_error = torch.sum(torch.square(env.commands[:, :2] - env.base_lin_vel[:, :2]),dim=1)   
     return torch.exp(-lin_vel_error / lin_vel_sigma) * (base_height > 0.31)
 
 def tracking_lin_vel_y(env: BaseTask):
@@ -336,7 +337,7 @@ def rew_stand_success(env: BaseTask):
                 & both_wheels
                 & knees_clear
                 & (base_contact_force < 5.0)
-                & (pose_error < 0.12)
+                & (pose_error < 0.15)
                 & (base_ang_speed < 0.50)
     ) 
     # 必须在状态机判定稳定站立后才持续给奖励
@@ -367,7 +368,7 @@ def rew_deadpoint_escape(env: BaseTask):
 
     # 双轮接触
     wheel_fz = env.contact_forces[:, env.feet_indices, 2]
-    both_wheels = torch.all(wheel_fz > cfg.wheel_contact_force, dim=1)
+    both_wheels = torch.any(wheel_fz > cfg.wheel_contact_force, dim=1)
 
     # 双膝均离地
     knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1)
@@ -478,9 +479,7 @@ def hip_rate_l2(env: BaseTask):
 
 def pen_max_velocity_l2(env: BaseTask):
     abs_vel = env.base_lin_vel[:,0]
-    abs_command = env.commands[:,0]
-
-
+    abs_command = env.commands[:,0] 
     vel_low_1 = abs_vel > abs_command* 0.8
     vel_high_1 = abs_vel < abs_command* 1.1
     

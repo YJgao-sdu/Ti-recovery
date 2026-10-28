@@ -117,8 +117,8 @@ class TitaGetupCfg(BaseConfig):
     
     class control:
         control_type ={"leg_1":"P","leg_2":"P","leg_3":"P","leg_4":"V"}   # P: position, V: velocity, T: torques
-        stiffness = {"leg_1": 40,"leg_2": 40,"leg_3": 40,"leg_4":0.0}
-        damping = {"leg_1": 1,"leg_2": 1,"leg_3":1,"leg_4":1.000}  # [N*m*s/rad]
+        stiffness = {"leg_1": 40,"leg_2": 40,"leg_3": 40,"leg_4":1.0}
+        damping = {"leg_1": 1,"leg_2": 1,"leg_3":1,"leg_4":0.000}  # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = [0.25, 0.25, 0.25, 8.0, 0.25, 0.25, 0.25, 8.0]  # action scaling factors
         #if need change the action scale value in one training, use this mode
@@ -279,7 +279,7 @@ class TitaGetupCfg(BaseConfig):
             pen_dof_acc_l2 = -2.5e-6
             pen_dof_vel_l2 = -4.0e-3
             pen_action_rate_l2 = -0.1
-            pen_dof_pos_bias_l2 = -0.12
+            pen_dof_pos_bias_l2 = -0.16
             pen_no_fly_l2 = -0.2
             track_base_height_exp = 5.0
             feet_distance = -2.0
@@ -375,7 +375,7 @@ class TitaGetupCfg(BaseConfig):
             delay_start_epochs = 500
 
         only_positive_rewards = False
-        tracking_sigma = 0.12  # tracking reward = exp(-error^2/sigma)0.0085
+        tracking_sigma = 0.1  # tracking reward = exp(-error^2/sigma)0.0085
         soft_dof_pos_limit = (
                 0.9  # percentage of URDF limits, values above this limit are penalized
             )
