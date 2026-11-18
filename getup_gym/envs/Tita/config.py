@@ -26,7 +26,7 @@ class TitaGetupCfg(BaseConfig):
         #8. gaps with gap size = gap_size
         #9. pits with depth = pit_depth
         #else: plane
-        terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
         # trimesh only:
         slope_treshold = (
             0.8  # slopes above this threshold will be corrected to vertical surfaces
@@ -52,7 +52,7 @@ class TitaGetupCfg(BaseConfig):
         ]
 
         #terrain params setting
-        slope_max = 0.25
+        slope_max = 0.5
         stairs_height_range = [0.01, 0.1]
         stairs_width_range = [0.3, 0.42]
         discrete_obstacles_height_range = [0.01, 0.06]
@@ -82,7 +82,7 @@ class TitaGetupCfg(BaseConfig):
         class ranges():
             lin_vel_x_only = 1500
             without_lin_vel_y = 500 # not add lin_vel_x_only
-            lin_vel_x = [-1.0, 1.0]  # min max [m/s] 0.4
+            lin_vel_x = [-1.2, 1.2]  # min max [m/s] 0.4
             lin_vel_y = [-0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [-0.8, 0.8]  # min max [rad/s]0.5
             angle_pitch = [-0.2, 0.2]
@@ -90,8 +90,8 @@ class TitaGetupCfg(BaseConfig):
             rew_base_height = [0.24, 0.4]
     
     class init_state:
-        pos = [0.0, 0.0, 0.3]       # (x, y, z [m])
-        rot = [0.0, 0.0, 0.0, 1.0] # [0.0, -1.0, 0.0, 1.0]  # (x, y, z, w [quat])
+        pos = [0.0, 0.0, 0.25]       # (x, y, z [m])
+        rot = [0.0, -1.0, 0.0, 1.0] # [0.0, -1.0, 0.0, 1.0]  # (x, y, z, w [quat])
         lin_vel = [0.0, 0.0, 0.0]   # x,y,z [m/s]    
         ang_vel = [0.0, 0.0, 0.0]   # x,y,z [rad/s]
         default_joint_angles = {  # target angles when action = 0.0
@@ -117,10 +117,10 @@ class TitaGetupCfg(BaseConfig):
     
     class control:
         control_type ={"leg_1":"P","leg_2":"P","leg_3":"P","leg_4":"V"}   # P: position, V: velocity, T: torques
-        stiffness = {"leg_1": 40,"leg_2": 40,"leg_3": 40,"leg_4":1.0}
-        damping = {"leg_1": 1,"leg_2": 1,"leg_3":1,"leg_4":0.000}  # [N*m*s/rad]
+        stiffness = {"leg_1": 40,"leg_2": 40,"leg_3": 40,"leg_4":0.35}
+        damping = {"leg_1": 1,"leg_2": 1,"leg_3":1,"leg_4":0.0020}  # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
-        action_scale = [0.25, 0.25, 0.25, 8.0, 0.25, 0.25, 0.25, 8.0]  # action scaling factors
+        action_scale = [0.25, 0.25, 0.25, 1.0, 0.25, 0.25, 0.25, 1.0]  # action scaling factors
         #if need change the action scale value in one training, use this mode
         using_actions_scale_changing = False
         action_scale_final = [0.2, 0.2, 0.2, 1.0, 0.2, 0.2, 0.2, 1.0]
@@ -165,47 +165,47 @@ class TitaGetupCfg(BaseConfig):
     class domain_rand:
 
         randomize_friction = True  
-        friction_range = [0.1, 1.2]
+        friction_range = [0.1, 0.9]
         randomize_base_mass = True
-        added_mass_range = [-0.1, 1.2]  
+        added_mass_range = [-1.5, 2]  
 
         #PD domain rand
-        randomize_pd = False
-        kp_range = {"hiprange": [58.0, 62.0], "femrange": [39.0, 42.0], "tibrange": [39.0, 42.0], "wheelrange": [1.01, 0.99]}
-        kd_range = {"hiprange": [3.4, 3.6], "femrange": [1.9, 2.1], "tibrange": [1.9, 2.1]}
+        randomize_pd = True
+        kp_range = [0.8, 1.2]
+        kd_range = [0.8, 1.2]
 
-        push_robots = True
+        push_robots = False
         push_start_epoch = 2000
         push_interval_s = 5.0 
         max_push_vel_x = 1.0
         max_push_vel_y = 1.0
 
         #force push(not velocity push)
-        randomize_force_push = False
-        push_rigid_name = ["torso"]
+        randomize_force_push = True
+        push_rigid_name = ["base_link", "left_leg_4", "right_leg_4"]
         push_direction = [
-            ["x", "y"],
+            ["x", "y", "z"], ["x", "y"], ["x", "y"]
         ]
         force_push_start_epoch = 3000
         #push the robot every force_push_interval_s seconds
         force_push_interval_s = 10.0 
-        push_force_x_range = [-100.0, 100.0]
-        push_force_y_range = [-100.0, 100.0]  
-        push_force_z_range = [-0.0, 0.0]
+        push_force_x_range = [-50.0, 50.0]
+        push_force_y_range = [-50.0, 50.0]  
+        push_force_z_range = [-100.0, 100.0]
 
         #rand restitution
         randomize_restitution = True
         restitution_range = [0.0, 0.7]
 
         #rand motor strength
-        randomize_motor_strength = False
-        joint_name_need_strength_rand = ["lfempitch", "rfempitch"]
-        motor_strength_range = [0.5, 0.8]
+        randomize_motor_strength = True
+        joint_name_need_strength_rand = ["joint_left_leg_2", "joint_right_leg_2", "joint_left_leg_3","joint_right_leg_3","joint_left_leg_4","joint_right_leg_4"]
+        motor_strength_range = [0.8, 1.25]
 
         add_mass_ranges = True
-        add_mass_range_x = {"upper": 0.02, "lower": -0.02}
-        add_mass_range_y = {"upper": 0.01, "lower": -0.01}
-        add_mass_range_z = {"upper": 0.01, "lower":  -0.01}
+        add_mass_range_x = {"upper": 0.08, "lower": -0.05}
+        add_mass_range_y = {"upper": 0.03, "lower": -0.03}
+        add_mass_range_z = {"upper": 0.02, "lower":  -0.02}
 
         #pose randm
         randomize_joint_pos = False
@@ -215,6 +215,7 @@ class TitaGetupCfg(BaseConfig):
         randomize_torso_size = False
         torso_size_coeff = 0.05 # torso size = size + [-size* torso_size_coeff, size* torso_size_coeff]
         #this is only used when the torso is box
+        delay = False
 
     class rewards:
         
@@ -236,31 +237,43 @@ class TitaGetupCfg(BaseConfig):
             pen_base_orientation_l2 = -2.6
             pen_base_orientation_z_l2 = -0.6
             track_base_height_exp = 4.0
+            pen_torques_l2 =-1.0e-05
             pen_dof_acc_l2 = -2.5e-8
-            pen_action_rate_l2 = -0.06
+            pen_wheel_dof_acc_l2 = -2.5e-6
+            pen_action_rate_l2 = -0.1 #-0.06
+            pen_wheel_action_rate = 0.0 #-0.04
+            pen_action_smoothness_l2 = -0.02
+            pen_wheel_action_smoothness = 0.0 # -0.08 
             pen_dof_pos_bias_l2 = -0.06
             pen_two_leg_bias_l2 = -0.02
-            pen_no_fly_l2 = -2.0
+            pen_no_fly_l2 = -4.0
             rew_wheel_contact_force = 4.0
             pen_knee_contact = -2.0
             rew_both_wheels_contact = 1.0
             rew_default_pose = 2.0
             rew_stand_success = 4.0
             rew_deadpoint_escape = 1.0 
-            wheel_adjustment = 1.0
+            wheel_adjustment = 0.1#1.0
             leg_symmetry = 1.0
+            # pen_wheel_vel = -0.5
+            # pen_body_bias = -0.3
 
         class reward_group_3:
             pen_termination = -100
             pen_base_orientation_l2 = -2.0
             pen_base_orientation_z_l2 = -1.0
-            pen_torques_l2 = -1.0e-6
+            pen_torques_l2 = -1.0e-5
             pen_dof_acc_l2 = -2.5e-6
-            pen_action_rate_l2 = -0.02
+            pen_wheel_dof_acc_l2 = -2.5e-6
+            pen_action_rate_l2 = -0.1 #-0.04
+            pen_wheel_action_rate = 0.0 #-0.04
+            pen_action_smoothness_l2 = -0.02
+            pen_wheel_action_smoothness = 0.0 #-0.1
             pen_two_leg_bias_l2 = -0.02
             pen_dof_pos_bias_l2 = -0.14
+            pen_no_fly_l2 = -1.0
             track_base_height_exp = 6.0
-            wheel_adjustment = 1.0
+            wheel_adjustment = 0.1#1.0
             rew_wheel_contact_force = 4.0
             pen_knee_contact = -2.0
             rew_both_wheels_contact = 1.0
@@ -268,17 +281,22 @@ class TitaGetupCfg(BaseConfig):
             rew_stand_success = 4.0
             rew_deadpoint_escape = 1.0 
             leg_symmetry = 1.0
+            # pen_wheel_vel = -0.5
+            # pen_body_bias = -0.3
             # collision = -1.0
 
         class reward_group_4:
             pen_termination = -500.0           #
             track_lin_vel_xy_exp = 7.0
             track_ang_vel_yaw_exp = 4.0
+            ang_vel_xy = -0.01
             pen_base_orientation_l2 = -15.0              #
             pen_torques_l2 = -1.0e-5
             pen_dof_acc_l2 = -2.5e-6
+            pen_wheel_dof_acc_l2 = -2.5e-6
             pen_dof_vel_l2 = -4.0e-3
-            pen_action_rate_l2 = -0.1
+            pen_action_rate_l2 = -0.1 #-0.1
+            pen_wheel_action_rate = 0.0 #-0.04
             pen_dof_pos_bias_l2 = -0.16
             pen_no_fly_l2 = -0.2
             track_base_height_exp = 5.0
@@ -287,9 +305,10 @@ class TitaGetupCfg(BaseConfig):
             pen_dof_pos_limits = -5.0
 
             pen_torque_limits = -0.05
-            pen_action_smoothness_l2 = -0.02
+            pen_action_smoothness_l2 = -0.06
+            pen_wheel_action_smoothness = 0.0 #-0.1
             pen_joint_power_l2 = -1.0e-4
-            wheel_adjustment = 1.0
+            wheel_adjustment = 0.1#1.0
             rew_wheel_contact_force = 4.0
             pen_knee_contact = -2.0
             rew_both_wheels_contact = 1.0
@@ -297,31 +316,34 @@ class TitaGetupCfg(BaseConfig):
             rew_stand_success = 4.0
             rew_deadpoint_escape = 1.0 
             leg_symmetry = 1.0
+            # pen_wheel_vel = -0.5
+            # pen_body_bias = -0.3
             # collision = -2.0
 
         min_feet_distance = 0.55
         max_feet_distance = 0.64   
         leg_symmetry_tracking_sigma = 0.001
+        zero_stable = True
 
         class curriculum:
             """Stage-wise curriculum: reward groups, target heights, pull-up assistance."""
             reward_group = ["reward_group_1", "reward_group_2", "reward_group_3", "reward_group_4"]
-            target_height = [0.1, 0.2, 0.3, 0.4]
+            target_height = [0.1, 0.2, 0.3, 0.38]
             using_pull_up = True
-            base_pull_up_max = 600.0
+            base_pull_up_max = 300.0
             using_pull_up_end = True
-            pull_up_end_epochs = 3000
+            pull_up_end_epochs = 4000
         
         class recovery:
             # 机身姿态门槛
-            upright_z = -0.90
+            upright_z = -0.92
 
             # 阶段转换的高度门槛
             height_p0_to_p1 = 0.07
             height_p1_to_p2 = 0.24
 
             # 最终站立高度
-            height_stand_target = 0.40
+            height_stand_target = 0.38
             height_stand_tolerance = 0.04
 
             # 接触力门槛
@@ -338,15 +360,15 @@ class TitaGetupCfg(BaseConfig):
             stand_pose_tolerance = 0.12
 
             # 稳定站立时允许的基座角速度
-            stand_ang_vel_tolerance = 0.50
+            stand_ang_vel_tolerance = 0.1
             # 死点检测的基座高度范围
             deadpoint_height_min = 0.24
 
-            # 双轮 + 至少一侧膝盖持续接触的最短时间
+            # 基座或至少一侧膝盖持续接触的最短时间
             deadpoint_hold_s = 1.20
 
             # 在上述接触模式下，没有明显高度进展的最短时间
-            deadpoint_no_progress_s = 0.75
+            deadpoint_no_progress_s = 1.0
 
             # 基座高度至少增加多少才认为出现了有效进展，单位 m
             deadpoint_min_height_progress = 0.015
@@ -381,7 +403,7 @@ class TitaGetupCfg(BaseConfig):
             )
         soft_dof_vel_limit = 0.5  # penalizes joint velocity near limits
         soft_torque_limit = 0.8
-        base_height_target = 0.4
+        base_height_target = 0.38
         max_contact_force = 200.0  # forces above this value are penalized  200
         
     class normalization:
@@ -509,7 +531,7 @@ class TitaGetUpPPO(BaseConfig):
         )
         
         num_steps_per_env = 24      
-        max_iterations = 12000        
+        max_iterations = 15000        
 
         # logging
         save_interval = 500          # check for potential saves every this many iterations

@@ -54,7 +54,13 @@ class LeggedRobot(BaseTask):
     def step(self, actions):
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        self.delayed_actions = self.actions.clone().view(self.num_envs, 1, self.num_actions).repeat(1, self.cfg.control.decimation, 1)
+        delay_steps = torch.randint(0, self.cfg.control.decimation, (self.num_envs, 1), device=self.device)
+        if self.cfg.domain_rand.delay:
+            for i in range(self.cfg.control.decimation):
+                self.delayed_actions[:, i] = self.last_actions + (self.actions - self.last_actions) * (i >= delay_steps)
         self.render()
+        
         for _ in range(self.cfg.control.decimation):
             if (
                 self.cfg.rewards.curriculum.using_pull_up
@@ -73,7 +79,7 @@ class LeggedRobot(BaseTask):
                     self.real_episode_length_buf.unsqueeze(1) > self.unactuated_time
                 )
 
-            self.torques = self._compute_torques(self.actions).view(self.torques.shape)
+            self.torques = self._compute_torques(self.delayed_actions[:, _]).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(
                 self.sim, gymtorch.unwrap_tensor(self.torques)
             )
@@ -304,6 +310,7 @@ class LeggedRobot(BaseTask):
         mesh_type = self.cfg.terrain.mesh_type
         if mesh_type in ["heightfield", "trimesh"]:
             self.terrain = Terrain(self.cfg.terrain, self.num_envs)
+            print("执行 create_sim")
         if mesh_type == "plane":
             self._create_ground_plane()
         elif mesh_type == "heightfield":
@@ -700,10 +707,10 @@ class LeggedRobot(BaseTask):
             requires_grad=False,
         )
         self.p_gains = torch.zeros(
-            self.num_actions, dtype=torch.float, device=self.device, requires_grad=False
+            self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.d_gains = torch.zeros(
-            self.num_actions, dtype=torch.float, device=self.device, requires_grad=False
+            self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.actions = torch.zeros(
             self.num_envs,
@@ -780,14 +787,14 @@ class LeggedRobot(BaseTask):
 
         p_gains_i = 0
         for dof_name in self.cfg.control.stiffness.keys():
-            self.p_gains[p_gains_i + int(self.num_dofs / 2)] = self.cfg.control.stiffness[
+            self.p_gains[:, p_gains_i + int(self.num_dofs / 2)] = self.cfg.control.stiffness[
                 dof_name
             ]
-            self.d_gains[p_gains_i + int(self.num_dofs / 2)] = self.cfg.control.damping[
+            self.d_gains[:, p_gains_i + int(self.num_dofs / 2)] = self.cfg.control.damping[
                 dof_name
             ]
-            self.p_gains[p_gains_i] = self.cfg.control.stiffness[dof_name]
-            self.d_gains[p_gains_i] = self.cfg.control.damping[dof_name]
+            self.p_gains[:, p_gains_i] = self.cfg.control.stiffness[dof_name]
+            self.d_gains[:, p_gains_i] = self.cfg.control.damping[dof_name]
             p_gains_i += 1
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
         self.init_dof_pos = self.init_dof_pos.unsqueeze(0)
@@ -795,23 +802,44 @@ class LeggedRobot(BaseTask):
         self.kp = torch.zeros(
             self.num_dof, device=self.device, requires_grad=False, dtype=torch.float32
         )
+        self.kp_origin = torch.zeros(
+            self.num_dof, device=self.device, requires_grad=False, dtype=torch.float32
+        )
         self.kd = torch.zeros(
+            self.num_dof, device=self.device, requires_grad=False, dtype=torch.float32
+        )
+        self.kd_origin = torch.zeros(
             self.num_dof, device=self.device, requires_grad=False, dtype=torch.float32
         )
         self.action_scale = torch.zeros(
             self.num_dof, device=self.device, requires_grad=False, dtype=torch.float32
         )
-        if (
-            hasattr(self.cfg.control, "action_scale")
-            and isinstance(self.cfg.control.action_scale, dict)
-        ):
-            for dof_name, value in self.cfg.control.stiffness.items():
+        # kp/kd 无条件填充
+        for dof_name, value in self.cfg.control.stiffness.items():
+            joint_idx = self.find_joint_id(dof_name)
+            if joint_idx:
+                joint_idx_t = torch.tensor(joint_idx, device=self.device)
+                self.kp[joint_idx_t] = value
+                self.kd[joint_idx_t] = self.cfg.control.damping[dof_name]
+        # action_scale 仅在 dict 形式时按名称填充
+        if isinstance(self.cfg.control.action_scale, dict):
+            for dof_name, value in self.cfg.control.action_scale.items():
                 joint_idx = self.find_joint_id(dof_name)
                 if joint_idx:
-                    joint_idx_t = torch.tensor(joint_idx, device=self.device)
-                    self.kp[joint_idx_t] = value
-                    self.kd[joint_idx_t] = self.cfg.control.damping[dof_name]
-                    self.action_scale[joint_idx_t] = self.cfg.control.action_scale[dof_name]
+                    self.action_scale[torch.tensor(joint_idx, device=self.device)] = value
+        self.kp_origin = self.kp.unsqueeze(0)
+        self.kd_origin = self.kd.unsqueeze(0)
+        # if (
+        #     hasattr(self.cfg.control, "action_scale")
+        #     and isinstance(self.cfg.control.action_scale, dict)
+        # ):
+        #     for dof_name, value in self.cfg.control.stiffness.items():
+        #         joint_idx = self.find_joint_id(dof_name)
+        #         if joint_idx:
+        #             joint_idx_t = torch.tensor(joint_idx, device=self.device)
+        #             self.kp[joint_idx_t] = value
+        #             self.kd[joint_idx_t] = self.cfg.control.damping[dof_name]
+        #             self.action_scale[joint_idx_t] = self.cfg.control.action_scale[dof_name]
 
         self.compute_observations_without_noise()
         num_obs = self.obs_buf.shape[1]
@@ -881,7 +909,7 @@ class LeggedRobot(BaseTask):
         push_direction = self.cfg.domain_rand.push_direction
         if len(push_rigid_name) != len(push_direction):
             raise AttributeError(
-                "rigid number is not epual to numbers in direction, please check it!"
+                "rigid number is not equal to numbers in direction, please check it!"
             )
         self.push_direction_to_id = []
 
@@ -1023,6 +1051,7 @@ class LeggedRobot(BaseTask):
         tm_params.static_friction = self.cfg.terrain.static_friction
         tm_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         tm_params.restitution = self.cfg.terrain.restitution
+        print("执行 _create_trimesh")
         self.gym.add_triangle_mesh(
             self.sim,
             self.terrain.vertices.flatten(order="C"),

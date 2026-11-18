@@ -46,6 +46,11 @@ pen_dof_acc_l2 = RewardManagerCfg(
     weight=0.0,
 )
 
+pen_wheel_dof_acc_l2 = RewardManagerCfg(
+    func=pen_wheel_dof_acc_l2,
+    weight=0.0,
+)
+
 collision = RewardManagerCfg(
     func=collision,
     weight=0.0,
@@ -61,8 +66,18 @@ rew_both_wheels_contact = RewardManagerCfg(
     weight=0.0,
 )
 
+pen_wheel_vel = RewardManagerCfg(
+    func=pen_wheel_vel,
+    weight=0.0,
+)
+
 pen_action_rate_l2 = RewardManagerCfg(
     func=pen_action_rate_l2,
+    weight=0.0,
+)
+
+pen_wheel_action_rate = RewardManagerCfg(
+    func=pen_wheel_action_rate,
     weight=0.0,
 )
 
@@ -121,6 +136,11 @@ feet_distance = RewardManagerCfg(
     weight=0.0,
 )
 
+pen_body_bias = RewardManagerCfg(
+    func=pen_body_bias,
+    weight=0.0,
+)
+
 leg_symmetry = RewardManagerCfg(
     func=leg_symmetry,
     weight=0.0,
@@ -166,6 +186,11 @@ track_base_height_exp = RewardManagerCfg(
     weight=0.0
 )
 
+ang_vel_xy = RewardManagerCfg(
+    func=ang_vel_xy,
+    weight=0.0
+)
+
 hip_limits = RewardManagerCfg(
     func=hip_limits,
     weight= 0.0,
@@ -202,6 +227,11 @@ rew_two_wheel_stand = RewardManagerCfg(
 
 pen_action_smoothness_l2 = RewardManagerCfg(
     func=pen_action_smoothness_l2,
+    weight=0.0
+)
+
+pen_wheel_action_smoothness = RewardManagerCfg(
+    func=pen_wheel_action_smoothness,
     weight=0.0
 )
 
@@ -414,14 +444,18 @@ def reward_register(reward_manager: RewardManager):
     # reward_manager.register_reward(orientation_z_l2)
     reward_manager.register_reward(pen_torques_l2)
     reward_manager.register_reward(pen_dof_acc_l2)
+    reward_manager.register_reward(pen_wheel_dof_acc_l2)
     reward_manager.register_reward(pen_dof_vel_l2)
     reward_manager.register_reward(collision)
     reward_manager.register_reward(pen_knee_contact)
     reward_manager.register_reward(rew_both_wheels_contact)
+    reward_manager.register_reward(pen_wheel_vel)
     reward_manager.register_reward(track_base_height_exp)
     reward_manager.register_reward(track_base_height_exp)
+    reward_manager.register_reward(ang_vel_xy)
 
     reward_manager.register_reward(pen_action_rate_l2)
+    reward_manager.register_reward(pen_wheel_action_rate)
     reward_manager.register_reward(pen_dof_pos_bias_l2)
     reward_manager.register_reward(rew_stand_success)
     reward_manager.register_reward(rew_deadpoint_escape)
@@ -436,6 +470,7 @@ def reward_register(reward_manager: RewardManager):
     reward_manager.register_reward(no_fly)
     reward_manager.register_reward(knee_height)
     reward_manager.register_reward(feet_distance)
+    reward_manager.register_reward(pen_body_bias)
     reward_manager.register_reward(leg_symmetry)
     reward_manager.register_reward(wheel_distance_x)
     reward_manager.register_reward(wheel_adjustment)
@@ -455,6 +490,7 @@ def reward_register(reward_manager: RewardManager):
     reward_manager.register_reward(rew_wheel_contact_force)
     reward_manager.register_reward(rew_two_wheel_stand)
     reward_manager.register_reward(pen_action_smoothness_l2)
+    reward_manager.register_reward(pen_wheel_action_smoothness)
     reward_manager.register_reward(pen_joint_power_l2)
     reward_manager.register_reward(hip_limits)
     reward_manager.register_reward(slow_get_up)

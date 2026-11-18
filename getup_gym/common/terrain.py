@@ -142,7 +142,7 @@ class Terrain:
 
         elif choice < self.proportions[1]:
 
-            terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=2.5)
+            terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=1.5)
 
         elif choice < self.proportions[2]:
 

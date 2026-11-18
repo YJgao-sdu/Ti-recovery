@@ -24,7 +24,7 @@ def tolerance(x, bounds=(0.0, 0.0), margin=0.0, value_at_margin=0.1):
 
 def ang_vel_xy(env: BaseTask):
         # Penalize xy axes base angular velocity
-        return torch.sum(torch.square(env.base_ang_vel[:, :2]), dim=1)
+        return torch.sum(torch.square(env.base_ang_vel[:, :2]), dim=1) * (env.recovery_stage >= 2)
 
 # def heading_cmd(env: BaseTask):
 def rew_orientation(env: BaseTask):
@@ -96,10 +96,20 @@ def pen_dof_acc_l2(env: BaseTask):
     # Penalize dof accelerations
     return torch.sum(torch.square((env.last_dof_vel - env.dof_vel) / env.dt), dim=1)
 
+def pen_wheel_dof_acc_l2(env: BaseTask):
+    # Penalize dof accelerations
+    return torch.sum(torch.square((env.last_dof_vel[:,[3, 7]] - env.dof_vel[:,[3, 7]]) / env.dt), dim=1)
+
 def pen_action_rate_l2(env: BaseTask):
     # Penalize changes in actions
     return torch.sum(torch.square(
         env.last_actions - env.actions
+    ), dim=1)
+
+def pen_wheel_action_rate(env: BaseTask):
+    # Penalize changes in actions
+    return torch.sum(torch.square(
+        env.last_actions[:, [3, 7]] - env.actions[:, [3, 7]]
     ), dim=1)
     
 def action_rate_wheel(env: BaseTask):
@@ -193,6 +203,13 @@ def rew_both_wheels_contact(env: BaseTask):
     reward = (both_wheels.float() * upright.float() * height_gate * wheel_reward_enabled.float())
     return reward
 
+def pen_wheel_vel(env: BaseTask):
+    #惩罚轮子在基座未离地时的速度
+    base_contact = torch.norm(env.contact_forces[:, env.base_indice, :], dim=-1) > 1
+    wheel_vel = torch.sum(torch.square(env.dof_vel[:, [3, 7]]), dim=1)
+    return wheel_vel * base_contact.float()
+
+
 def pen_termination(env: BaseTask):
     # Terminal reward / penalty
     return env.reset_buf * ~env.time_out_buf
@@ -232,8 +249,15 @@ def track_lin_vel_xy_exp(env: BaseTask):
     base_height = torch.mean(env.rigid_body_states[:, env.base_indices, 2] - env.measured_heights, dim=1)
     # Tracking of linear velocity commands (xy axes)
     lin_vel_sigma = env.cfg.rewards.tracking_sigma
-    lin_vel_error = torch.sum(torch.square(env.commands[:, :2] - env.base_lin_vel[:, :2]),dim=1)   
-    return torch.exp(-lin_vel_error / lin_vel_sigma) * (base_height > 0.31)
+    lin_vel_error = torch.sum(torch.square(env.commands[:, :2] - env.base_lin_vel[:, :2]),dim=1)
+    lin_vel_reward = torch.exp(-lin_vel_error / lin_vel_sigma)
+    if env.cfg.rewards.zero_stable:
+            near_zero_mask = (env.commands[:, 0] >= -0.01) & (env.commands[:, 0] <= 0.01)
+            if torch.any(near_zero_mask):
+                second_error = torch.square(env.commands[near_zero_mask, 0] - env.base_lin_vel[near_zero_mask, 0])
+                second_reward = torch.exp(-second_error / env.cfg.rewards.tracking_sigma)
+                lin_vel_reward[near_zero_mask] += second_reward   
+    return lin_vel_reward * (base_height > 0.31)
 
 def tracking_lin_vel_y(env: BaseTask):
     # Tracking of linear velocity commands (y axis)
@@ -321,27 +345,10 @@ def rew_default_pose(env: BaseTask):
 def rew_stand_success(env: BaseTask):
     """
     B2: 已进入稳定站立阶段后，奖励持续满足站立条件。
-    """
-    leg_ids = [0, 1, 2, 4, 5, 6] 
-    pose_error = torch.mean(torch.abs(env.dof_pos[:, leg_ids] - env.default_dof_pos[:, leg_ids]), dim=1)
-    base_height = torch.mean(env.root_states[:, 2].unsqueeze(1) - env.measured_heights, dim=1) 
-    upright = env.projected_gravity[:, 2] < -0.90 
-    wheel_fz = env.contact_forces[:, env.feet_indices, 2] 
-    both_wheels = torch.all(wheel_fz > 5.0, dim=1) 
-    knee_force = torch.norm(env.contact_forces[:, env.calf_indices, :], dim=-1) 
-    knees_clear = torch.all(knee_force < 5.0, dim=1) 
-    base_ang_speed = torch.norm( env.base_ang_vel, dim=1) 
-    base_contact_force = torch.norm(env.contact_forces[:, env.base_indice, :], dim=-1) 
-    stand_ok = (upright 
-                & (torch.abs(base_height - 0.40) < 0.04)
-                & both_wheels
-                & knees_clear
-                & (base_contact_force < 5.0)
-                & (pose_error < 0.15)
-                & (base_ang_speed < 0.50)
-    ) 
-    # 必须在状态机判定稳定站立后才持续给奖励
-    reward = (stand_ok.float() * (env.recovery_stage == 3).float())
+    """ 
+    # 在状态机判定稳定站立后持续给奖励
+    reward = (env.recovery_stage == 3).float()
+    # print("rew_stand_success:", reward)
     return reward
 
 def rew_deadpoint_escape(env: BaseTask):
@@ -455,6 +462,15 @@ def stand_still(env: BaseTask):
         torch.norm(env.commands[:, :2], dim=1) < 0.1
     )
 
+def pen_body_bias(env: BaseTask):
+    a = env.base_position[:, 0] - env.env_origins[:, 0]
+    b = env.base_position[:, 1] - env.env_origins[:, 1]
+    bias = torch.square(a) + torch.square(b)
+    z_noup = env.projected_gravity[:, 2] >= -0.92
+    lin_x_zero = (torch.abs(env.commands[:, 0]) < 0.05)
+    pen_valid = torch.any(z_noup | lin_x_zero)
+    return torch.clip(bias, 0, 4)* z_noup
+    
 def hip_rate_l1(env: BaseTask):
     """hip's reward"""
     lhip_rate = torch.abs(torch.tensor(env.dof_pos[:,0] - env.default_dof_pos[:,0], device=env.device))
@@ -515,6 +531,9 @@ def pen_action_smoothness_l2(env: BaseTask):
     """make action smooth"""
     return torch.sum(torch.square(env.actions - 2* env.last_actions + env.last_last_action), dim=-1) 
 
+def pen_wheel_action_smoothness(env: BaseTask):
+    """make action smooth"""
+    return torch.sum(torch.square(env.actions[:, [3, 7]] - 2* env.last_actions[:, [3, 7]] + env.last_last_action[:, [3, 7]]), dim=-1)
 
 def wheel_distance_x(env: BaseTask):
     # contacts = torch.abs(env.contact_forces[:, env.feet_indices, 2]) > 0.1

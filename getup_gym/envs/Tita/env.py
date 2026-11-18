@@ -1,6 +1,6 @@
 import isaacgym
 import torch
-from isaacgym import gymtorch
+from isaacgym import gymtorch, gymapi, gymutil, gymutil
 from isaacgym.torch_utils import quat_rotate_inverse, torch_rand_float, to_torch, get_axis_params, quat_apply
 from getup_gym.common.math_utils import torch_rand_float
 
@@ -25,6 +25,10 @@ class Tita(LeggedRobot):
             cfg.observation_stack = cfg.env.observation_stack
 
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
+
+        # 初始化接触载荷和辅助目标刚体索引
+        self._init_force_target_indices()
+
         self._init_recovery_state()
         self._init_deadpoint_state()
         self.unactuated_time = self.cfg.env.unactuated_timesteps * 0.02 / self.dt
@@ -118,6 +122,14 @@ class Tita(LeggedRobot):
         ContactForce_lwheel = self.contact_forces[:, 4, :3].squeeze(1)
         ContactForce_rwheel = self.contact_forces[:, 8, :3].squeeze(1)
 
+        # =====================================================
+        # 2. 新增五维归一化接触载荷
+        # =====================================================
+
+        contact_loads = self._get_five_contact_loads()
+
+        # [base, left_calf, right_calf, left_wheel, right_wheel]
+
         Torque = self.torques
         JointAccelerate = (self.last_dof_vel - self.dof_vel) / self.dt
 
@@ -135,6 +147,7 @@ class Tita(LeggedRobot):
                 ContactForce_rwheel,
                 base_height * 0.4,
                 self.root_states,
+                contact_loads,
             ],
             dim=-1,
         )
@@ -285,18 +298,18 @@ class Tita(LeggedRobot):
             )
             if control_type[joint_control_name[joint_control_j]] == "P":
                 torques[:, j] = (
-                    self.p_gains[j]
+                    self.p_gains[:, j]
                     * (
                         actions_scaled[:, j]
                         + self.default_dof_pos[:, j]
                         - self.dof_pos[:, j]
                     )
-                    - self.d_gains[j] * self.dof_vel[:, j]
+                    - self.d_gains[:, j] * self.dof_vel[:, j]
                 )
             elif control_type[joint_control_name[joint_control_j]] == "V":
                 torques[:, j] = (
-                    self.p_gains[j] * (actions_scaled[:, j] - self.dof_vel[:, j])
-                    - self.d_gains[j]
+                    self.p_gains[:, j] * (actions_scaled[:, j] - self.dof_vel[:, j])
+                    - self.d_gains[:, j]
                     * (self.dof_vel[:, j] - self.last_dof_vel[:, j])
                     / self.sim_params.dt
                 )
@@ -380,6 +393,18 @@ class Tita(LeggedRobot):
             len(env_ids_int32),
         )
 
+    def _reset_pd_params(self, env_ids):
+
+        kp_scale = torch.rand(len(env_ids), self.num_actions, device=self.device) * (
+            self.cfg.domain_rand.kp_range[1] - self.cfg.domain_rand.kp_range[0]
+        ) + self.cfg.domain_rand.kp_range[0]
+        kd_scale = torch.rand(len(env_ids), self.num_actions, device=self.device) * (
+            self.cfg.domain_rand.kd_range[1] - self.cfg.domain_rand.kd_range[0]
+        ) + self.cfg.domain_rand.kd_range[0]
+
+        self.p_gains[env_ids] = self.kp_origin * kp_scale
+        self.d_gains[env_ids] = self.kd_origin * kd_scale
+
     def reset_idx(self, env_ids):
         """B3:重置环境:并以一定概率重采样历史死点状态。"""
 
@@ -388,12 +413,17 @@ class Tita(LeggedRobot):
 
         cfg = self.cfg.rewards.recovery
         # --------------------------------------------------
-        # A. 先记录刚结束的 episode 是否出现过死点
+        # A. 先记录刚结束的 episode 是否出现过死点 / 是否恢复站立成功
         # --------------------------------------------------
         if hasattr(self, "deadpoint_ever"):
             deadpoint_done = (self.deadpoint_ever[env_ids].detach().clone())
         else:
             deadpoint_done = torch.zeros(env_ids.numel(), dtype=torch.bool, device=self.device)
+
+        if hasattr(self, "recovery_succeeded"):
+            stand_success_done = (self.recovery_succeeded[env_ids].detach().clone())
+        else:
+            stand_success_done = torch.zeros(env_ids.numel(), dtype=torch.bool, device=self.device)
 
         # --------------------------------------------------
         # B. 决定哪些重置环境使用困难状态回放
@@ -415,6 +445,8 @@ class Tita(LeggedRobot):
         #    包含 DOF、root state、命令和历史缓存等
         # --------------------------------------------------
         super().reset_idx(env_ids)
+        if self.cfg.domain_rand.randomize_pd:
+            self._reset_pd_params(env_ids)
         # --------------------------------------------------
         # D. 覆盖部分环境的初始状态
         # --------------------------------------------------
@@ -515,6 +547,7 @@ class Tita(LeggedRobot):
             self.extras["episode"]["deadpoint_episode_rate"] = (deadpoint_done.float().mean())
             self.extras["episode"]["deadpoint_episode_count"] = (deadpoint_done.float().sum())
             self.extras["episode"]["deadpoint_replay_rate"] = (replay_ids.numel() / env_ids.numel())
+            self.extras["episode"]["stand_success_rate"] = (stand_success_done.float().mean())
 
     def _get_heights_below_foot(self):
         """ Samples heights of the terrain at required points around each foot. 
@@ -650,7 +683,7 @@ class Tita(LeggedRobot):
         self.deadpoint_replay_size = min(capacity, self.deadpoint_replay_size + count)
 
     def _update_deadpoint_detector(self):
-        """B3:检测持续三点支撑且缺乏恢复进展的局部最优。"""
+        """B3:检测缺乏恢复进展的局部最优。"""
 
         cfg = self.cfg.rewards.recovery
         # 1. 基座高度
@@ -660,9 +693,10 @@ class Tita(LeggedRobot):
         # 3. 左右轮均有足够的垂直接触力
         wheel_fz = self.contact_forces[:, self.feet_indices, 2]
         both_wheels = torch.any(wheel_fz > cfg.wheel_contact_force, dim=1)
-        # 4. 至少一侧膝盖有明显接触力
-        knee_force = torch.norm(self.contact_forces[:, self.calf_indices, :], dim=-1)
-        any_knee = torch.any(knee_force > cfg.knee_contact_force, dim=1)
+        # 4. 至少一侧膝盖或基座有明显接触力
+        link_indices = torch.cat((self.calf_indices, self.base_indices), dim=-1)
+        link_force = torch.norm(self.contact_forces[:, link_indices, :], dim=-1)
+        any_link = torch.any(link_force > cfg.knee_contact_force, dim=1)
         # 5. 排除已经完成恢复的环境
         height_in_deadpoint_range = (
             (base_height >= cfg.deadpoint_height_min)
@@ -670,9 +704,9 @@ class Tita(LeggedRobot):
         )
 
         candidate = (
-            both_wheels
-            & any_knee
-            & upright
+            # both_wheels
+            any_link
+            # & upright
             & height_in_deadpoint_range
             & (self.recovery_stage < 3)
         )
@@ -805,7 +839,7 @@ class Tita(LeggedRobot):
         pose_error = torch.mean(torch.abs(self.dof_pos[:, leg_ids] - self.default_dof_pos[:, leg_ids]), dim=1)
 
         # 6. 基座角速度
-        base_ang_speed = torch.norm(self.base_ang_vel, dim=1)
+        base_ang_speed = torch.norm(self.base_ang_vel[:, :2], dim=1)
 
         # 7. 基座接触检测
         # 当前项目已有 base_indice 的使用方式；
@@ -887,3 +921,263 @@ class Tita(LeggedRobot):
         self.fall_count[regress] = 0
         self.wheel_ready_count[regress] = 0
         self.stand_success_count[regress] = 0
+
+    def _process_rigid_body_props(self, props, env_id):
+        """记录每个并行环境经过质量随机化后的机器人总质量。"""
+
+        props = super()._process_rigid_body_props(props, env_id)
+
+        if not hasattr(self, "robot_mass_per_env"):
+            self.robot_mass_per_env = torch.zeros(
+                self.num_envs,
+                dtype=torch.float,
+                device=self.device
+            )
+
+        self.robot_mass_per_env[env_id] = sum(
+            prop.mass for prop in props
+        )
+
+        return props
+    
+    def _init_force_target_indices(self):
+        """初始化五个接触载荷刚体及三个辅助目标刚体的索引。"""
+
+        # 五维接触载荷：
+        # [base, left_calf, right_calf, left_wheel, right_wheel]
+
+        self.contact_load_body_indices = torch.tensor(
+            [
+                self.base_indice,
+                int(self.calf_indices[0].item()),
+                int(self.calf_indices[1].item()),
+                int(self.feet_indices[0].item()),
+                int(self.feet_indices[1].item()),
+            ],
+            dtype=torch.long,
+            device=self.device
+        )
+
+        # 三个候选辅助目标：
+        # [base, left_thigh, right_thigh]
+
+        thigh_indices = self.find_rigid_body_id(
+            ["left_leg_2", "right_leg_2"]
+        )
+
+        self.pull_up_target_indices = torch.tensor(
+            [
+                self.base_indice,
+                thigh_indices[0],
+                thigh_indices[1],
+            ],
+            dtype=torch.long,
+            device=self.device
+        )
+
+        if torch.any(self.contact_load_body_indices < 0):
+            raise RuntimeError("接触载荷刚体索引无效，请检查 URDF 刚体名称")
+
+        if torch.any(self.pull_up_target_indices < 0):
+            raise RuntimeError("辅助目标刚体索引无效，请检查 URDF 刚体名称")
+        
+    def _get_five_contact_loads(self):
+        """
+        获取五个刚体的归一化接触载荷。
+
+        返回：
+            [num_envs, 5]
+
+        顺序：
+            base, left_calf, right_calf,
+            left_wheel, right_wheel
+        """
+
+        # 获取五个刚体的三维接触力
+        contact_force = self.contact_forces[
+            :, self.contact_load_body_indices, :
+        ]
+
+        # 接触力模长
+        contact_force_norm = torch.linalg.vector_norm(
+            contact_force,
+            dim=-1
+        )
+
+        # 实际机器人总重
+        gravity = torch.linalg.vector_norm(
+            torch.tensor(
+                self.cfg.sim.gravity,
+                dtype=torch.float,
+                device=self.device
+            )
+        )
+
+        robot_weight = self.robot_mass_per_env * gravity
+
+        # 归一化接触载荷
+        contact_loads = contact_force_norm / (
+            robot_weight.unsqueeze(1).clamp_min(1e-6)
+        )
+
+        return contact_loads
+    
+    def _base_force_pull_up(self):
+        """
+        基于接触载荷选择辅助目标刚体。
+
+        目标选择：
+            1. 基座接触载荷最大 -> 基座
+            2. 左小腿接触载荷最大 -> 左大腿
+            3. 右小腿接触载荷最大 -> 右大腿
+
+        其余辅助力、辅助力矩、时间衰减、
+        高度控制和延迟屏蔽逻辑保持原样。
+        """
+
+        # =====================================================
+        # 1. 保留原有辅助力计算逻辑
+        # =====================================================
+
+        force_max = self.cfg.rewards.curriculum.base_pull_up_max
+
+        base_height = torch.mean(
+            self.root_states[:, 2].unsqueeze(1) - self.measured_heights,
+            dim=1
+        )
+
+        time_coeff = torch.tensor(
+            (
+                self.cfg.rewards.curriculum.pull_up_end_epochs
+                - ((self.common_step_counter - 1) / 24)
+            ) / self.cfg.rewards.curriculum.pull_up_end_epochs,
+            device=self.device
+        )
+
+        time_coeff = torch.clamp(time_coeff, 0.0, 1.0)
+
+        if not getattr(
+            self.cfg.rewards.curriculum,
+            "using_pull_up_end",
+            True
+        ):
+            time_coeff = torch.ones_like(time_coeff)
+
+        base_height_target = getattr(
+            self.cfg.rewards.curriculum,
+            "base_height_target",
+            0.5
+        )
+
+        force_scale = (
+            (base_height_target - base_height) / base_height_target
+        ) * force_max * time_coeff
+
+        self.force_scale = torch.clamp(
+            force_scale,
+            0.0,
+            force_max
+        )
+
+        # =====================================================
+        # 2. 获取五维归一化接触载荷
+        # =====================================================
+
+        contact_loads = self._get_five_contact_loads()
+
+        # 仅使用基座、左右小腿的接触载荷选择目标
+        candidate_loads = contact_loads[:, 0:3]
+
+        # 每个环境分别选择接触载荷最大的刚体
+        target_slot = torch.argmax(
+            candidate_loads,
+            dim=1
+        )
+
+        # 映射为实际辅助目标刚体索引
+        target_body_indices = self.pull_up_target_indices[
+            target_slot
+        ]
+        
+        # =====================================================
+        # 3. 初始化外力和力矩张量
+        # =====================================================
+
+        forces = torch.zeros(
+            (self.num_envs, self.num_bodies, 3),
+            device=self.device,
+            dtype=torch.float
+        )
+
+        torques = torch.zeros_like(forces)
+
+        env_indices = torch.arange(
+            self.num_envs,
+            device=self.device
+        )
+
+        # =====================================================
+        # 4. 对每个环境的目标刚体施加 Z 方向辅助力
+        # =====================================================
+
+        forces[
+            env_indices,
+            target_body_indices,
+            2
+        ] = self.force_scale
+
+        # =====================================================
+        # 5. 保留原有辅助力矩逻辑
+        # =====================================================
+
+        env_start = getattr(self.cfg.rewards, "pull_up_env_start", 0)
+        env_end = getattr(self.cfg.rewards, "pull_up_env_end", self.num_envs)
+        torque_scale = getattr(self.cfg.rewards, "pull_up_torque_scale", -10.0)
+
+        if env_end > env_start:
+
+            env_range = torch.arange(env_start, env_end, device=self.device)
+
+            selected_body_indices = target_body_indices[env_start:env_end]
+
+            rotate_scale = torch.abs(self.root_states[env_start:env_end, 4] + 1)
+
+            height_scale = (
+                (base_height_target - base_height)
+                / base_height_target
+            )[env_start:env_end]
+
+            torques[env_range, selected_body_indices, 0] = (
+                torque_scale
+                * time_coeff
+                * rotate_scale
+                * height_scale
+            )
+
+        # =====================================================
+        # 6. 保留原有延迟动作屏蔽逻辑
+        # =====================================================
+
+        if (
+            hasattr(self, "real_episode_length_buf")
+            and hasattr(self, "unactuated_time")
+        ):
+
+            mask = (
+                self.real_episode_length_buf.unsqueeze(1)
+                > self.unactuated_time
+            ).unsqueeze(1)
+
+            forces = forces * mask
+            torques = torques * mask
+
+        # =====================================================
+        # 7. 保留原有 Isaac Gym 外力施加逻辑
+        # =====================================================
+
+        self.gym.apply_rigid_body_force_tensors(
+            self.sim,
+            gymtorch.unwrap_tensor(forces),
+            gymtorch.unwrap_tensor(torques),
+            gymapi.ENV_SPACE
+        )
