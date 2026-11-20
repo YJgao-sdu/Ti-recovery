@@ -77,8 +77,8 @@ def _prepare_env_and_runner(args):
     env_cfg.domain_rand.push_robots = False
     env_cfg.rewards.curriculum.using_pull_up = False
     env_cfg.terrain.mesh_type = "plane"
-    env_cfg.commands.ranges.lin_vel_x = [0.0, 0.0]
-    env_cfg.commands.ranges.ang_vel_yaw = [0.0, 0.0]
+    # env_cfg.commands.ranges.lin_vel_x = [0.0, 0.0]
+    # env_cfg.commands.ranges.ang_vel_yaw = [0.0, 0.0]
     env_cfg.commands.ranges.lin_vel_y = [0.0, 0.0]
 
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)

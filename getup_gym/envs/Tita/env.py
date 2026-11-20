@@ -1,5 +1,7 @@
 import isaacgym
 import torch
+import os
+import csv
 from isaacgym import gymtorch, gymapi, gymutil, gymutil
 from isaacgym.torch_utils import quat_rotate_inverse, torch_rand_float, to_torch, get_axis_params, quat_apply
 from getup_gym.common.math_utils import torch_rand_float
@@ -122,13 +124,18 @@ class Tita(LeggedRobot):
         ContactForce_lwheel = self.contact_forces[:, 4, :3].squeeze(1)
         ContactForce_rwheel = self.contact_forces[:, 8, :3].squeeze(1)
 
+        # 1. 机身坐标系线速度
+        base_lin_vel = self.base_lin_vel
         # =====================================================
         # 2. 新增五维归一化接触载荷
         # =====================================================
-
-        contact_loads = self._get_five_contact_loads()
-
+        all_contact_loads = self._get_five_contact_loads() 
+        contact_loads = all_contact_loads[:, 0:3]
         # [base, left_calf, right_calf, left_wheel, right_wheel]
+        # 3. 五维接触状态
+        contact_states = self._get_five_contact_states()
+        # 4. 左右轮滑移速度
+        slip_velocity = self._get_wheel_slip_velocity()
 
         Torque = self.torques
         JointAccelerate = (self.last_dof_vel - self.dof_vel) / self.dt
@@ -143,13 +150,19 @@ class Tita(LeggedRobot):
 
         teacher_encoder_observations = torch.cat(
             [
+                base_lin_vel,
                 ContactForce_lwheel,
                 ContactForce_rwheel,
                 base_height * 0.4,
-                self.root_states,
+                contact_states,
                 contact_loads,
+                slip_velocity,
             ],
             dim=-1,
+        )
+        assert teacher_encoder_observations.shape[-1] == 20, (
+            f"Teacher observation dimension error: "
+            f"{teacher_encoder_observations.shape[-1]}"
         )
         self.teacher_encoder_obs_buf = teacher_encoder_observations
         if (
@@ -1021,6 +1034,115 @@ class Tita(LeggedRobot):
         )
 
         return contact_loads
+    
+    def _get_five_contact_states(self):
+        """
+        五维接触状态：
+        [base, left_calf, right_calf, left_wheel, right_wheel]
+
+        返回：[num_envs, 5]
+        0 = 未接触
+        1 = 接触
+        """
+
+        forces = self.contact_forces[
+            :, self.contact_load_body_indices, :
+        ]
+
+        force_norm = torch.linalg.vector_norm(forces, dim=-1)
+
+        # 与现有恢复阶段接触力判据保持一致
+        threshold = torch.tensor(
+            [
+                self.cfg.rewards.recovery.base_contact_force,
+                self.cfg.rewards.recovery.knee_contact_force,
+                self.cfg.rewards.recovery.knee_contact_force,
+                self.cfg.rewards.recovery.wheel_contact_force,
+                self.cfg.rewards.recovery.wheel_contact_force,
+            ],
+            device=self.device,
+            dtype=torch.float,
+        )
+
+        contact_states = (force_norm > threshold.unsqueeze(0)).float()
+
+        return contact_states
+    
+    def _get_wheel_slip_velocity(self):
+        """
+        计算左右轮沿滚动方向的接触点速度。
+
+        返回：[num_envs, 2]
+        单位:m/s
+
+        当前适用于水平地面。
+        """
+
+        wheel_indices = self.feet_indices
+
+        # 刚体状态：[position(3), quaternion(4),
+        #            linear_velocity(3), angular_velocity(3)]
+        wheel_states = self.rigid_body_states[:, wheel_indices, :]
+
+        wheel_quat = wheel_states[:, :, 3:7]
+        wheel_lin_vel = wheel_states[:, :, 7:10]
+        wheel_ang_vel = wheel_states[:, :, 10:13]
+
+        # URDF轮子半径
+        wheel_radius = 0.0925
+
+        # 轮子局部旋转轴为Z轴，转换到世界坐标系
+        local_axis = torch.zeros(
+            self.num_envs, 2, 3,
+            device=self.device
+        )
+        local_axis[..., 2] = 1.0
+
+        wheel_axis = quat_apply(
+            wheel_quat.reshape(-1, 4),
+            local_axis.reshape(-1, 3)
+        ).reshape(self.num_envs, 2, 3)
+
+        # 水平地面法向
+        world_up = torch.zeros_like(wheel_axis)
+        world_up[..., 2] = 1.0
+
+        # 轮子滚动方向
+        rolling_dir = torch.cross(
+            wheel_axis, world_up, dim=-1
+        )
+
+        rolling_dir = torch.nn.functional.normalize(
+            rolling_dir, dim=-1, eps=1e-6
+        )
+
+        # 轮心到假设接触点的向量
+        r_contact = torch.zeros_like(wheel_lin_vel)
+        r_contact[..., 2] = -wheel_radius
+
+        # 接触点速度
+        contact_point_vel = (
+            wheel_lin_vel
+            + torch.cross(
+                wheel_ang_vel,
+                r_contact,
+                dim=-1
+            )
+        )
+
+        # 沿滚动方向投影
+        slip_velocity = torch.sum(
+            contact_point_vel * rolling_dir,
+            dim=-1
+        )
+
+        # 非接触状态下不提供虚假的地面滑移监督
+        contact_states = self._get_five_contact_states()
+        wheel_contact = contact_states[:, 3:5]
+
+        slip_velocity = slip_velocity * wheel_contact
+
+        return slip_velocity
     
     def _base_force_pull_up(self):
         """
