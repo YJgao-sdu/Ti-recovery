@@ -145,6 +145,23 @@ class EncoderAlgConfig:
     alg_type: str = MISSING
     """alg for training encoder
     """
+    # B1 physical supervision coefficients
+    velocity_loss_coef: float = 1.0
+
+    contact_loss_coef: float = 1.0
+
+    slip_loss_coef: float = 1.0
+
+    # Gradient diagnostics
+    grad_log_interval: int = 1
+
+    # Fixed normalization statistics.
+    # None means identity normalization for preliminary tests.
+    velocity_mean: list = None
+    velocity_std: list = None
+
+    slip_mean: list = None
+    slip_std: list = None
     
 @dataclass
 class EncoderContrastiveAlgConfig:

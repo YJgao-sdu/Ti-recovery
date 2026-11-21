@@ -65,7 +65,7 @@ class TitaGetupCfg(BaseConfig):
         layer_size = 12             # encoder's layer size    
         env_spacing = 3.0           # not used with heightfields/trimeshes
         send_timeouts = True        # (send time out information to the algorithm)
-        episode_length_s = 20       # (episode length in seconds)
+        episode_length_s = 10       # (episode length in seconds)
         unactuated_timesteps = 30
 
         class myself_setting:
@@ -76,7 +76,7 @@ class TitaGetupCfg(BaseConfig):
         curriculum = False
         max_curriculum = 1.0
         num_commands = 6  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 10.0  # time before command are changed[s]
+        resampling_time = 5.0  # time before command are changed[s]
         heading_command = False  # if true: compute ang vel command from heading error
         base_height_command = False
         class ranges():
@@ -500,7 +500,7 @@ class TitaGetUpPPO(BaseConfig):
             student_encoder_name = "MLP-Encoder", #"MLP-Encoder", "MLP-UNet"
             student_resume_check_point = "",
             teacher_encoder_alg_type = "KL-Entropy", #None
-            student_encoder_alg_class_name = "MSE", #MSE
+            student_encoder_alg_class_name = "PhysicsAssistedMSE", #MSE
             student_encoder_inference_decimation = 10,
             teacher_encoder_config = MlpEncoderConfig(
                 encoder_hidden_dims = [256, 128],
@@ -516,6 +516,17 @@ class TitaGetUpPPO(BaseConfig):
                 num_learning_epochs = 5, #test good is 3,maybe 4 is better
                 max_grad_norm = 0.8,
                 mse_loss_coef= 1.0,
+                velocity_loss_coef=1.0,
+                contact_loss_coef=1.0,
+                slip_loss_coef=1.0,
+
+                grad_log_interval=1,
+
+                velocity_mean=None,
+                velocity_std=None,
+
+                slip_mean=None,
+                slip_std=None,
                 student_kl_coef= 0.1,
                 alg_type = "MSE",
             )

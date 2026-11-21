@@ -12,6 +12,7 @@ from getup_gym.modules.actor_critic import ActorCritic
 from getup_gym.modules.encoder import TeacherEncoder, StudentEncoder
 from getup_gym.algorithms.ts_ppo import TSPPO
 from getup_gym.algorithms.encoder_mse import EncoderMSE
+from getup_gym.algorithms.physics_assisted_mse import PhysicsAssistedMSE
 
 
 class OnPolicyRunner:
@@ -55,7 +56,14 @@ class OnPolicyRunner:
                 layer_size=self.env.layer_size,
                 **self.encoder_cfg["student_encoder_config"],
             ).to(self.device)
-            self.student_encoder_alg = EncoderMSE(
+            alg_name = self.encoder_cfg["student_encoder_alg_class_name"]
+            if alg_name == "MSE":
+                student_alg_class = EncoderMSE
+            elif alg_name == "PhysicsAssistedMSE":
+                student_alg_class = PhysicsAssistedMSE
+            else:
+                raise ValueError(f"Unsupported Student Encoder algorithm: {alg_name}")
+            self.student_encoder_alg = student_alg_class(
                 self.num_steps_per_env,
                 self.env.num_envs,
                 self.student_encoder,
