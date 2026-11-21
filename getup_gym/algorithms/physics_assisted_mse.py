@@ -50,17 +50,17 @@ class PhysicsAssistedMSE(EncoderMSE):
         # Fixed normalization statistics.
         # These must be calculated from an independent calibration dataset.
         self.velocity_mean = self._make_stat(
-            velocity_mean, 3, 0.0
+            velocity_mean, 3
         )
         self.velocity_std = self._make_stat(
-            velocity_std, 3, 1.0
+            velocity_std, 3
         )
 
         self.slip_mean = self._make_stat(
-            slip_mean, 2, 0.0
+            slip_mean, 2
         )
         self.slip_std = self._make_stat(
-            slip_std, 2, 1.0
+            slip_std, 2
         )
 
         if torch.any(self.velocity_std <= 0):
@@ -86,32 +86,37 @@ class PhysicsAssistedMSE(EncoderMSE):
         print("Slip mean:", self.slip_mean.tolist())
         print("Slip std:", self.slip_std.tolist())
 
-    def _make_stat(self, value, dim, default):
+    def _make_stat(self, value, dim):
 
         if value is None:
-            tensor = torch.full(
-                (dim,),
-                float(default),
-                dtype=torch.float32,
-                device=self.device,
+            raise ValueError(
+                "B1 normalization statistics cannot be None."
             )
-        else:
-            tensor = torch.as_tensor(
-                value,
-                dtype=torch.float32,
-                device=self.device,
-            )
+
+        tensor = torch.as_tensor(
+            value,
+            dtype=torch.float32,
+            device=self.device,
+        )
 
         if tensor.shape != (dim,):
             raise ValueError(
-                f"Expected normalization statistic shape "
-                f"({dim},), got {tuple(tensor.shape)}"
+                f"Expected shape ({dim},), "
+                f"got {tuple(tensor.shape)}"
             )
 
         if not torch.isfinite(tensor).all():
-            raise ValueError("Normalization statistics contain NaN/Inf")
+            raise ValueError(
+                "Normalization statistics contain NaN or Inf."
+            )
+        if torch.any(self.velocity_std <= 0):
+            raise ValueError("velocity_std must be positive")
+
+        if torch.any(self.slip_std <= 0):
+            raise ValueError("slip_std must be positive")
 
         return tensor
+
 
     # ---------------------------------------------------------
     # 1. Compute four task losses
@@ -254,11 +259,20 @@ class PhysicsAssistedMSE(EncoderMSE):
             / slip_mask_float.sum().clamp_min(1.0)
         )
 
+        valid_slip_count = slip_mask_float.sum()
+
+        slip_valid_ratio = (
+            valid_slip_count
+            / slip_mask_float.numel()
+        )
         return {
             "loss_z": loss_z,
             "loss_v": loss_v,
             "loss_c": loss_c,
             "loss_s": loss_s,
+
+            "slip_valid_count": valid_slip_count.detach(),
+            "slip_valid_ratio": slip_valid_ratio.detach(),
         }
 
     # ---------------------------------------------------------
@@ -385,6 +399,9 @@ class PhysicsAssistedMSE(EncoderMSE):
             "mean_velocity_loss": 0.0,
             "mean_contact_loss": 0.0,
             "mean_slip_loss": 0.0,
+
+            "mean_slip_valid_ratio": 0.0,
+            "mean_slip_valid_count": 0.0,
         }
 
         gradient_sums = {}
@@ -460,6 +477,8 @@ class PhysicsAssistedMSE(EncoderMSE):
             loss_sums["mean_velocity_loss"] += loss_v.detach().item()
             loss_sums["mean_contact_loss"] += loss_c.detach().item()
             loss_sums["mean_slip_loss"] += loss_s.detach().item()
+            loss_sums["mean_slip_valid_ratio"] += (losses["slip_valid_ratio"].item())
+            loss_sums["mean_slip_valid_count"] += (losses["slip_valid_count"].item())
 
             num_updates += 1
 

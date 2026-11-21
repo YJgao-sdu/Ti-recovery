@@ -522,11 +522,24 @@ class TitaGetUpPPO(BaseConfig):
 
                 grad_log_interval=1,
 
-                velocity_mean=None,
-                velocity_std=None,
-
-                slip_mean=None,
-                slip_std=None,
+                velocity_mean = [
+                    -0.09213499173841934,
+                    0.0022584240169859415,
+                    0.04611887108748143
+                ],
+                velocity_std = [
+                    0.7249158245025945,
+                    0.09870197260206588,
+                    0.13143638357170245
+                ],
+                slip_mean = [
+                    -0.003826009844281968,
+                    0.0020827289491370943
+                ],
+                slip_std = [
+                    0.07200984447222634,
+                    0.06595172735807292
+                ],
                 student_kl_coef= 0.1,
                 alg_type = "MSE",
             )

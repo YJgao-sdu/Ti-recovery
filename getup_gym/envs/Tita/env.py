@@ -1070,28 +1070,29 @@ class Tita(LeggedRobot):
     
     def _get_wheel_slip_velocity(self):
         """
-        计算左右轮沿滚动方向的接触点速度。
+        Estimate longitudinal wheel-ground slip velocity.
 
-        返回：[num_envs, 2]
-        单位:m/s
+        Output:
+            [num_envs, 2]
+            [left_wheel, right_wheel]
 
-        当前适用于水平地面。
+        Assumption:
+            Static horizontal ground.
         """
 
         wheel_indices = self.feet_indices
 
-        # 刚体状态：[position(3), quaternion(4),
-        #            linear_velocity(3), angular_velocity(3)]
-        wheel_states = self.rigid_body_states[:, wheel_indices, :]
+        wheel_states = self.rigid_body_states[
+            :, wheel_indices, :
+        ]
 
         wheel_quat = wheel_states[:, :, 3:7]
         wheel_lin_vel = wheel_states[:, :, 7:10]
         wheel_ang_vel = wheel_states[:, :, 10:13]
 
-        # URDF轮子半径
-        wheel_radius = 0.0925
+        wheel_radius = 0.0925 
 
-        # 轮子局部旋转轴为Z轴，转换到世界坐标系
+        # Wheel axle: local Z axis
         local_axis = torch.zeros(
             self.num_envs, 2, 3,
             device=self.device
@@ -1103,24 +1104,62 @@ class Tita(LeggedRobot):
             local_axis.reshape(-1, 3)
         ).reshape(self.num_envs, 2, 3)
 
-        # 水平地面法向
+        wheel_axis = torch.nn.functional.normalize(
+            wheel_axis, dim=-1, eps=1e-6
+        )
+
         world_up = torch.zeros_like(wheel_axis)
         world_up[..., 2] = 1.0
 
-        # 轮子滚动方向
-        rolling_dir = torch.cross(
-            wheel_axis, world_up, dim=-1
+        # Project downward direction onto wheel plane
+        axis_projection = (
+            torch.sum(
+                wheel_axis * world_up,
+                dim=-1,
+                keepdim=True
+            ) * wheel_axis
         )
+
+        radial_down = -world_up + axis_projection
+
+        radial_norm = torch.linalg.vector_norm(
+            radial_down,
+            dim=-1,
+            keepdim=True
+        )
+
+        radial_valid = radial_norm.squeeze(-1) > 1e-5
+
+        radial_down = torch.nn.functional.normalize(
+            radial_down,
+            dim=-1,
+            eps=1e-6
+        )
+
+        r_contact = wheel_radius * radial_down
+
+        # Rolling direction
+        rolling_dir = torch.cross(
+            wheel_axis,
+            world_up,
+            dim=-1
+        )
+
+        rolling_norm = torch.linalg.vector_norm(
+            rolling_dir,
+            dim=-1,
+            keepdim=True
+        )
+
+        rolling_valid = rolling_norm.squeeze(-1) > 1e-5
 
         rolling_dir = torch.nn.functional.normalize(
-            rolling_dir, dim=-1, eps=1e-6
+            rolling_dir,
+            dim=-1,
+            eps=1e-6
         )
 
-        # 轮心到假设接触点的向量
-        r_contact = torch.zeros_like(wheel_lin_vel)
-        r_contact[..., 2] = -wheel_radius
-
-        # 接触点速度
+        # Contact-point velocity
         contact_point_vel = (
             wheel_lin_vel
             + torch.cross(
@@ -1130,19 +1169,29 @@ class Tita(LeggedRobot):
             )
         )
 
-        # 沿滚动方向投影
+        # Longitudinal velocity
         slip_velocity = torch.sum(
             contact_point_vel * rolling_dir,
             dim=-1
         )
 
-        # 非接触状态下不提供虚假的地面滑移监督
+        # Contact mask
         contact_states = self._get_five_contact_states()
+
         wheel_contact = contact_states[:, 3:5]
 
-        slip_velocity = slip_velocity * wheel_contact
+        valid_geometry = (
+            radial_valid & rolling_valid
+        ).float()
+
+        slip_velocity = (
+            slip_velocity
+            * wheel_contact
+            * valid_geometry
+        )
 
         return slip_velocity
+
     
     def _base_force_pull_up(self):
         """

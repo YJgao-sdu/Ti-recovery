@@ -208,7 +208,26 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs, force_buf)
 
+            teacher_param_before = [
+                p.detach().clone()
+                for p in self.teacher_encoder.parameters()
+            ]
             loss_dict = self.alg.update()
+            teacher_param_delta = torch.sqrt(
+                sum(
+                    torch.sum(
+                        (p.detach() - p_before) ** 2
+                    )
+                    for p, p_before in zip(
+                        self.teacher_encoder.parameters(),
+                        teacher_param_before
+                    )
+                )
+            ).item()
+
+            loss_dict["teacher_param_delta"] = (
+                teacher_param_delta
+            )
             encoder_loss_dict = {}
             if self.using_encoder:
                 encoder_loss_dict = self.student_encoder_alg.update()

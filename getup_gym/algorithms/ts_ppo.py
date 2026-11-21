@@ -130,13 +130,21 @@ class TSPPO:
     def update(self) -> dict:
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
+        # Teacher gradient statistics
+        teacher_grad_norm_sum = 0.0
+
+        # Number of PPO mini-batches
+        teacher_grad_count = 0
+
+        # Number of mini-batches where Teacher has gradients
+        teacher_grad_present_count = 0
 
         generator = self.storage.mini_batch_generator_together(self.num_mini_batches, self.num_learning_epochs)
         for (
             obs_batch,
             critic_obs_batch,
             teacher_encoder_obs_batch,
-            _,
+            env_ids_batch,
             actions_batch,
             target_values_batch,
             advantages_batch,
@@ -148,9 +156,38 @@ class TSPPO:
             _,
         ) in generator:
             # Inject teacher encoder latent for teacher-group agents
-            if self.inference_mode == "CTS" and self.teacher_encoder is not None:
-                zt_batch = self.teacher_encoder.backward(teacher_encoder_obs_batch)
-                obs_batch[: self.num_teacher, : self.teacher_encoder.layer_size] = zt_batch["zt"][: self.num_teacher, :]
+            
+            # --------------------------------------------------
+            # CTS: Inject current Teacher latent only into
+            # actual Teacher-group samples.
+            # --------------------------------------------------
+
+            if (
+                self.inference_mode == "CTS"
+                and self.teacher_encoder is not None
+            ):
+
+                teacher_mask = (
+                    env_ids_batch < self.num_teacher
+                )
+
+                if teacher_mask.any():
+
+                    teacher_obs_selected = (
+                        teacher_encoder_obs_batch[teacher_mask]
+                    )
+
+                    zt_selected = self.teacher_encoder.backward(
+                        teacher_obs_selected
+                    )["zt"]
+
+                    obs_batch = obs_batch.clone()
+
+                    obs_batch[
+                        teacher_mask,
+                        :self.teacher_encoder.layer_size
+                    ] = zt_selected
+
 
             self.actor_critic.act(obs_batch)
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
@@ -200,9 +237,42 @@ class TSPPO:
 
             self.optimizer.zero_grad()
             loss.backward()
+            # --------------------------------------------------
+            # Teacher gradient audit
+            # --------------------------------------------------
+
+            teacher_grad_norm = 0.0
+
             if self.teacher_encoder is not None:
+
+                teacher_grads = [
+                    p.grad.detach().norm(2)
+                    for p in self.teacher_encoder.parameters()
+                    if p.grad is not None
+                ]
+
+                if teacher_grads:
+
+                    teacher_grad_norm = torch.norm(
+                        torch.stack(teacher_grads)
+                    ).item()
+
+                    teacher_grad_present_count += 1
+
+                # Accumulate gradient norm
+                teacher_grad_norm_sum += teacher_grad_norm
+
+                teacher_grad_count += 1
+
+            # --------------------------------------------------
+            # Gradient clipping
+            # --------------------------------------------------
+
+            if self.teacher_encoder is not None:
+
                 nn.utils.clip_grad_norm_(
-                    list(self.actor_critic.parameters()) + list(self.teacher_encoder.parameters()),
+                    list(self.actor_critic.parameters())
+                    + list(self.teacher_encoder.parameters()),
                     self.max_grad_norm,
                 )
             else:
@@ -213,9 +283,33 @@ class TSPPO:
             mean_surrogate_loss += surrogate_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
+        # Average Teacher gradient norm
+        if teacher_grad_count > 0:
+
+            mean_teacher_grad_norm = (
+                teacher_grad_norm_sum / teacher_grad_count
+            )
+
+        else:
+
+            mean_teacher_grad_norm = 0.0
+
+        # Fraction of mini-batches with Teacher gradients
+        if teacher_grad_count > 0:
+
+            teacher_grad_present_ratio = (
+                teacher_grad_present_count / teacher_grad_count
+            )
+
+        else:
+
+            teacher_grad_present_ratio = 0.0
         self.storage.clear()
 
         return {
             "mean_value_loss": mean_value_loss / num_updates,
             "mean_surrogate_loss": mean_surrogate_loss / num_updates,
+            "mean_teacher_grad_norm": mean_teacher_grad_norm,
+            "teacher_grad_present_count": teacher_grad_present_count,
+            "teacher_grad_present_ratio": teacher_grad_present_ratio,
         }

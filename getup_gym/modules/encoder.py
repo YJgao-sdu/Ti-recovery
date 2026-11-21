@@ -129,6 +129,11 @@ class StudentEncoder(nn.Module):
         contact_logits = self.contact_head(features)
 
         slip = self.slip_head(features)
+        assert features.shape[-1] == 128
+        assert zt.shape[-1] == 12
+        assert velocity.shape[-1] == 3
+        assert contact_logits.shape[-1] == 5
+        assert slip.shape[-1] == 2
 
         return {
             "zt": zt,

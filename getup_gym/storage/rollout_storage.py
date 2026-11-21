@@ -135,12 +135,17 @@ class RolloutStorage:
                 start = i * mini_batch_size
                 end = (i + 1) * mini_batch_size
                 batch_idx = indices[start:end]
+                # Flattened storage order:
+                # [time_step, env_id]
+                # Therefore env_id = flattened_index % num_envs
+
+                env_ids = batch_idx % self.num_envs
 
                 yield (
                     obs[batch_idx],
                     critic_obs[batch_idx],
                     teacher_obs[batch_idx] if self.has_encoder else None,
-                    None,
+                    env_ids,
                     actions[batch_idx],
                     target_values[batch_idx],
                     advantages[batch_idx],
