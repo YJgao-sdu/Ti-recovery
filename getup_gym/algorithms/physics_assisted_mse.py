@@ -108,14 +108,10 @@ class PhysicsAssistedMSE(EncoderMSE):
         if not torch.isfinite(tensor).all():
             raise ValueError(
                 "Normalization statistics contain NaN or Inf."
-            )
-        if torch.any(self.velocity_std <= 0):
-            raise ValueError("velocity_std must be positive")
-
-        if torch.any(self.slip_std <= 0):
-            raise ValueError("slip_std must be positive")
-
+            ) 
+ 
         return tensor
+
 
 
     # ---------------------------------------------------------

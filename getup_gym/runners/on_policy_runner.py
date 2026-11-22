@@ -248,6 +248,23 @@ class OnPolicyRunner:
 
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+        self.encoder_save(
+            os.path.join(
+                self.log_dir,
+                "teacher_encoder_model",
+                f"model_{self.current_learning_iteration}.pt"
+            ),
+            "teacher"
+        )
+
+        self.encoder_save(
+            os.path.join(
+                self.log_dir,
+                "student_encoder_model",
+                f"model_{self.current_learning_iteration}.pt"
+            ),
+            "student"
+        )
 
     def log(self, it, num_learning_iterations, collection_time, learn_time, loss_dict, encoder_loss_dict,
             ep_infos, rewbuffer, lenbuffer, force_buf, width=80, pad=35):
