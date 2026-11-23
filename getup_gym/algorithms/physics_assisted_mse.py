@@ -429,7 +429,7 @@ class PhysicsAssistedMSE(EncoderMSE):
             # Gradient diagnostics:
             # First mini-batch of this iteration only.
             if (
-                batch_index == 0
+                batch_index % self.num_mini_batch == 0 #batch_index == 0
                 and self.update_count % self.grad_log_interval == 0
             ):
 

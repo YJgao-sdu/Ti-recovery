@@ -27,21 +27,42 @@ _PLOT_COLORS = [
 PLOT_WHEEL_STATE = False
 
 
+class _LatentProjection(torch.nn.Module):
+    """Student encoder's backbone + latent head composed as one module.
+
+    Equivalent to StudentEncoder.forward(obs)["zt"] = latent_head(backbone(obs)),
+    but built from the two submodules directly so the traced ONNX graph contains
+    no Python control flow: StudentEncoder.forward's input-size check and shape
+    asserts would otherwise be baked in during export.
+    """
+
+    def __init__(self, student_encoder):
+        super().__init__()
+        self.backbone = student_encoder.backbone
+        self.latent_head = student_encoder.latent_head
+
+    def forward(self, obs):
+        return self.latent_head(self.backbone(obs))
+
+
 class StudentPolicy(torch.nn.Module):
     """Student encoder + actor composed into a single deployable module.
 
     Mirrors the play() CTS inference path exactly:
     zt = student_encoder(student_obs), actions = act_inference(cat(zt, obs)).
 
-    The encoder MLP (student_encoder.encoder) is used directly so the traced
-    ONNX graph contains no Python control flow: StudentEncoder.forward's
-    input-size check would otherwise be baked in as a constant and emit a
-    TracerWarning during export.
+    The encoder's backbone + latent head are used directly (via
+    _LatentProjection) so the traced ONNX graph contains no Python control
+    flow: StudentEncoder.forward's input-size check would otherwise be baked
+    in as a constant and emit a TracerWarning during export.
     """
 
     def __init__(self, student_encoder, actor_critic):
         super().__init__()
-        self.encoder = student_encoder.encoder
+        if hasattr(student_encoder, "encoder"):
+            self.encoder = student_encoder.encoder
+        else:
+            self.encoder = _LatentProjection(student_encoder)
         self.actor_critic = actor_critic
 
     def forward(self, student_obs, obs):
